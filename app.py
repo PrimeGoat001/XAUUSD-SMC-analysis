@@ -14,7 +14,7 @@ app = Flask(__name__)
 SYMBOL = "GC=F"
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/" + SYMBOL
 
-PRICE_OFFSET = 0.00
+PRICE_OFFSET = -35.26
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -28,7 +28,7 @@ VALID_TFS = set(RANGE_MAP.keys())
 
 _cache = {}
 _cache_lock = threading.Lock()
-CACHE_TTL = 2 # CHANGED: 15 -> 2 for live forming
+CACHE_TTL = 2
 
 def safe_float(value, default=0.0):
     try:
@@ -70,19 +70,17 @@ def normalize_tf(tf):
     return tf if tf in VALID_TFS else "15m"
 
 # ============================================================
-# DATA ENGINE (YAHOO FINANCE FETCH + OFFSET APPLICATION)
+# DATA ENGINE
 # ============================================================
 
 def get_gold(interval="15m"):
     interval = normalize_tf(interval)
     now = time.time()
-
     with _cache_lock:
         if interval in _cache:
             cached_candles, timestamp = _cache[interval]
             if now - timestamp < CACHE_TTL:
                 return cached_candles
-
     tf_range = RANGE_MAP[interval]
     params = {
         "interval": interval,
@@ -90,35 +88,28 @@ def get_gold(interval="15m"):
         "includePrePost": "false",
         "events": "div,splits",
     }
-
     try:
         response = SESSION.get(YAHOO_URL, params=params, timeout=10)
         response.raise_for_status()
         payload = response.json()
-
         chart = payload.get("chart", {})
         results = chart.get("result")
         if not results:
             return []
-
         result = results[0]
         timestamps = result.get("timestamp", [])
         quote = result.get("indicators", {}).get("quote", [{}])[0]
-
         opens = quote.get("open", [])
         highs = quote.get("high", [])
         lows = quote.get("low", [])
         closes = quote.get("close", [])
         volumes = quote.get("volume", [])
-
         candles = []
         length = min(len(timestamps), len(opens), len(highs), len(lows), len(closes))
-
         for i in range(length):
             o, h, l, c = opens[i], highs[i], lows[i], closes[i]
             if o is None or h is None or l is None or c is None:
                 continue
-
             candles.append({
                 "time": int(timestamps[i]),
                 "open": round(float(o) + PRICE_OFFSET, 2),
@@ -127,20 +118,14 @@ def get_gold(interval="15m"):
                 "close": round(float(c) + PRICE_OFFSET, 2),
                 "volume": int(volumes[i]) if i < len(volumes) and volumes[i] is not None else 0,
             })
-
         result_candles = candles[-250:]
-
         with _cache_lock:
             _cache[interval] = (result_candles, time.time())
-
         return result_candles
     except Exception as exc:
         print(f"[DATA ERROR] {interval}: {exc}")
         return []
 
-# ============================================================
-# LIVE PRICE ENGINE - Makes chart move like OANDA (NEW)
-# ============================================================
 _last_live_price = 0
 _last_live_fetch = 0
 
@@ -177,7 +162,7 @@ def get_gold_with_live(interval="15m"):
     return candles
 
 # ============================================================
-# TECHNICAL INDICATORS (UNCHANGED - REST OF YOUR FILE)
+# TECHNICAL INDICATORS (UNCHANGED)
 # ============================================================
 
 def calculate_rsi(closes, period=14):
@@ -204,11 +189,7 @@ def calculate_atr(candles, period=14):
     true_ranges = []
     for i in range(1, len(candles)):
         c, p = candles[i], candles[i - 1]
-        tr = max(
-            c["high"] - c["low"],
-            abs(c["high"] - p["close"]),
-            abs(c["low"] - p["close"])
-        )
+        tr = max(c["high"] - c["low"], abs(c["high"] - p["close"]), abs(c["low"] - p["close"]))
         true_ranges.append(tr)
     return round(sum(true_ranges[-period:]) / period, 4) if true_ranges else 0.0
 
@@ -293,8 +274,7 @@ def detect_structure(candles):
         event = "CHoCH" if previous_state == "BULLISH" else "BOS"
         return {"state": "BEARISH", "event": event, "level": last_low, "index": last_low_idx}
     return {
-        "state": previous_state,
-        "event": None,
+        "state": previous_state, "event": None,
         "level": last_high if previous_state == "BULLISH" else last_low if previous_state == "BEARISH" else None,
         "index": last_high_idx if previous_state == "BULLISH" else last_low_idx if previous_state == "BEARISH" else None,
     }
@@ -428,12 +408,7 @@ def calculate_pd(candles):
     equilibrium = (swing_high + swing_low) / 2
     price = candles[-1]["close"]
     zone = "PREMIUM" if price > equilibrium else "DISCOUNT"
-    return {
-        "swing_high": round(swing_high, 2),
-        "swing_low": round(swing_low, 2),
-        "equilibrium": round(equilibrium, 2),
-        "current_zone": zone,
-    }
+    return {"swing_high": round(swing_high, 2), "swing_low": round(swing_low, 2), "equilibrium": round(equilibrium, 2), "current_zone": zone}
 
 def build_signal(candles, interval, mtf, structure, liquidity_events, fvg_zones, ob_zones, pd):
     price = candles[-1]["close"]
@@ -515,9 +490,7 @@ def smc_analysis(interval="15m"):
             "price": structure["level"],
             "color": "#00ff88" if structure["state"] == "BULLISH" else "#ff4444",
             "title": structure["event"] or structure["state"],
-            "lineStyle": 0,
-            "layer": "structure",
-            "active": True
+            "lineStyle": 0, "layer": "structure", "active": True
         })
     lines.extend(liquidity_lines)
     zones = []
@@ -528,37 +501,44 @@ def smc_analysis(interval="15m"):
         markers.append({"time": candles[structure["index"]]["time"] if structure["index"] is not None else candles[-1]["time"], "label": structure["event"]})
     for ev in liquidity_events:
         markers.append({"time": ev["time"], "label": ev["label"]})
-
-    # --- REST OF YOUR ORIGINAL smc_analysis RETURN (unchanged) ---
     return {
-        "status": "OK",
-        "symbol": SYMBOL,
-        "timeframe": interval,
-        "price": price,
-        "signal": signal_data["signal"],
-        "score": signal_data["score"],
-        "confidence": signal_data["confidence"],
-        "rsi": signal_data["rsi"],
-        "entry": signal_data["entry"],
-        "stopLoss": signal_data["stopLoss"],
-        "takeProfit1": signal_data["takeProfit1"],
-        "takeProfit2": signal_data["takeProfit2"],
-        "takeProfit3": signal_data["takeProfit3"],
-        "candles": candles,
-        "markers": markers,
-        "lines": lines,
-        "zones": zones,
-        "reasons": signal_data["reasons"],
-        "mtf_matrix": mtf,
-        "pd_zones": pd,
-        "atr": signal_data["atr"],
-        "bullish_mtf": signal_data["bullish_mtf"],
-        "bearish_mtf": signal_data["bearish_mtf"],
-        "market_open": is_market_open(),
-        "timestamp": now_utc_iso()
+        "status": "OK", "symbol": SYMBOL, "timeframe": interval, "price": price,
+        "signal": signal_data["signal"], "score": signal_data["score"], "confidence": signal_data["confidence"],
+        "rsi": signal_data["rsi"], "entry": signal_data["entry"], "stopLoss": signal_data["stopLoss"],
+        "takeProfit1": signal_data["takeProfit1"], "takeProfit2": signal_data["takeProfit2"], "takeProfit3": signal_data["takeProfit3"],
+        "candles": candles, "markers": markers, "lines": lines, "zones": zones,
+        "reasons": signal_data["reasons"], "mtf_matrix": mtf, "pd_zones": pd,
+        "atr": signal_data["atr"], "bullish_mtf": signal_data["bullish_mtf"], "bearish_mtf": signal_data["bearish_mtf"],
+        "market_open": is_market_open(), "timestamp": now_utc_iso()
     }
 
-# Flask routes (unchanged from your file)
+# ============================================================
+# NEWS API - SAFE VERSION (WON'T RUIN SYSTEM)
+# ============================================================
+_news_cache = {"data": [], "time": 0}
+@app.route("/api/news")
+def api_news():
+    # Return cached or empty instantly - never blocks main system
+    now = time.time()
+    if now - _news_cache["time"] < 300: # cache 5 min
+        return jsonify(_news_cache["data"])
+    try:
+        # Try fetch but with short timeout, if fails return empty
+        r = SESSION.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", timeout=3)
+        if r.status_code == 200:
+            data = r.json()
+            # Filter only high impact USD & Gold related
+            high = []
+            for ev in data[:20]:
+                if ev.get("impact") == "High" and ev.get("country") in ["USD", "US"]:
+                    high.append({"title": ev.get("title", ""), "date": ev.get("date", ""), "country": ev.get("country", "USD"), "impact": "High"})
+            _news_cache["data"] = high[:5]
+            _news_cache["time"] = now
+            return jsonify(high[:5])
+    except Exception as e:
+        print(f"[NEWS] {e}")
+    return jsonify(_news_cache["data"])
+
 @app.route("/")
 def index():
     return render_template("index.html")
