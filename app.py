@@ -8,12 +8,11 @@ from flask import Flask, jsonify, request, render_template
 app = Flask(__name__)
 
 # ============================================================
-# GOLD SMC PRO TERMINAL - NO YAHOO - SPOT ONLY
+# GOLD SMC PRO TERMINAL - NO YAHOO - SPOT ONLY - 9 TFs
 # ============================================================
 
 SYMBOL = "XAUUSD Spot"
 BINANCE_URL = "https://api.binance.com/api/v3/klines"
-
 PRICE_OFFSET = 0.00
 
 HEADERS = {
@@ -23,7 +22,12 @@ HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
-INTERVAL_MAP = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "1d": "1d"}
+# 9 TIMEFRAMES - 45m is custom aggregated
+INTERVAL_MAP = {
+    "1m": "1m", "5m": "5m", "15m": "15m",
+    "30m": "30m", "45m": "45m",
+    "1h": "1h", "2h": "2h", "4h": "4h", "1d": "1d"
+}
 VALID_TFS = set(INTERVAL_MAP.keys())
 
 _cache = {}
@@ -43,32 +47,51 @@ def now_utc_iso():
     return datetime.now(timezone.utc).isoformat()
 
 def normalize_tf(tf):
-    tf = str(tf or "15m").lower().strip()
+    tf = str(tf or "1m").lower().strip()
     aliases = {
-        "1": "1m", "5": "5m", "15": "15m",
-        "60": "1h", "1hr": "1h", "hour": "1h",
+        "1": "1m", "5": "5m", "15": "15m", "30": "30m", "45": "45m",
+        "60": "1h", "1hr": "1h", "2hr": "2h", "4hr": "4h",
+        "hour": "1h", "2h": "2h", "4h": "4h",
         "day": "1d", "daily": "1d"
     }
     tf = aliases.get(tf, tf)
-    return tf if tf in VALID_TFS else "15m"
+    return tf if tf in VALID_TFS else "1m"
 
 def is_market_open():
     now = datetime.now(timezone.utc)
-    day = now.weekday() # 0=Mon, 4=Fri, 5=Sat, 6=Sun
+    day = now.weekday()
     hour = now.hour
-    if day == 5: # Saturday = closed
+    if day == 5:
         return False
-    if day == 4 and hour >= 21: # Friday after 21 UTC
+    if day == 4 and hour >= 21:
         return False
-    if day == 6 and hour < 22: # Sunday before 22 UTC
+    if day == 6 and hour < 22:
         return False
     return True
+
+def aggregate_candles(candles, factor):
+    if not candles or factor <= 1:
+        return candles
+    aggregated = []
+    for i in range(0, len(candles), factor):
+        chunk = candles[i:i+factor]
+        if len(chunk) < factor:
+            continue
+        aggregated.append({
+            "time": chunk[0]["time"],
+            "open": chunk[0]["open"],
+            "high": round(max(c["high"] for c in chunk), 2),
+            "low": round(min(c["low"] for c in chunk), 2),
+            "close": chunk[-1]["close"],
+            "volume": sum(c["volume"] for c in chunk)
+        })
+    return aggregated
 
 # ============================================================
 # DATA ENGINE - BINANCE PAXG SPOT (NO YAHOO)
 # ============================================================
 
-def get_gold(interval="15m"):
+def get_gold(interval="1m"):
     interval = normalize_tf(interval)
     now = time.time()
 
@@ -78,7 +101,36 @@ def get_gold(interval="15m"):
             if now - timestamp < CACHE_TTL:
                 return cached_candles
 
-    bin_interval = INTERVAL_MAP.get(interval, "15m")
+    # Special handling for 45m - fetch 15m and aggregate x3
+    if interval == "45m":
+        params = {
+            "symbol": "PAXGUSDT",
+            "interval": "15m",
+            "limit": 750
+        }
+        try:
+            response = SESSION.get(BINANCE_URL, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            candles = []
+            for k in data:
+                candles.append({
+                    "time": int(k[0] / 1000),
+                    "open": round(float(k[1]) + PRICE_OFFSET, 2),
+                    "high": round(float(k[2]) + PRICE_OFFSET, 2),
+                    "low": round(float(k[3]) + PRICE_OFFSET, 2),
+                    "close": round(float(k[4]) + PRICE_OFFSET, 2),
+                    "volume": int(float(k[5])) if k[5] else 0,
+                })
+            result_candles = aggregate_candles(candles, 3)[-250:]
+            with _cache_lock:
+                _cache[interval] = (result_candles, time.time())
+            return result_candles
+        except Exception as exc:
+            print(f"[BINANCE ERROR] 45m: {exc}")
+            return []
+
+    bin_interval = INTERVAL_MAP.get(interval, "1m")
     params = {
         "symbol": "PAXGUSDT",
         "interval": bin_interval,
@@ -89,7 +141,6 @@ def get_gold(interval="15m"):
         response = SESSION.get(BINANCE_URL, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
-
         candles = []
         for k in data:
             candles.append({
@@ -100,12 +151,9 @@ def get_gold(interval="15m"):
                 "close": round(float(k[4]) + PRICE_OFFSET, 2),
                 "volume": int(float(k[5])) if k[5] else 0,
             })
-
         result_candles = candles[-250:]
-
         with _cache_lock:
             _cache[interval] = (result_candles, time.time())
-
         return result_candles
     except Exception as exc:
         print(f"[BINANCE ERROR] {interval}: {exc}")
@@ -136,11 +184,10 @@ def get_oanda_live():
             continue
     return _last_live_price
 
-def get_gold_with_live(interval="15m"):
+def get_gold_with_live(interval="1m"):
     candles = get_gold(interval)
     if not candles:
         return candles
-    # FREEZE WHEN MARKET CLOSED - no fake movement
     if not is_market_open():
         return candles
     live = get_oanda_live()
@@ -236,7 +283,11 @@ def build_mtf_matrix():
         "1m": get_single_tf_bias("1m"),
         "5m": get_single_tf_bias("5m"),
         "15m": get_single_tf_bias("15m"),
+        "30m": get_single_tf_bias("30m"),
+        "45m": get_single_tf_bias("45m"),
         "1h": get_single_tf_bias("1h"),
+        "2h": get_single_tf_bias("2h"),
+        "4h": get_single_tf_bias("4h"),
         "1d": get_single_tf_bias("1d"),
     }
 
@@ -420,10 +471,10 @@ def build_signal(candles, interval, mtf, structure, liquidity_events, fvg_zones,
     bearish_count = sum(1 for value in mtf.values() if value == "BEARISH")
     if bullish_count >= 3:
         score += 2
-        reasons.append(f"MTF alignment: {bullish_count}/5 bullish")
+        reasons.append(f"MTF alignment: {bullish_count}/9 bullish")
     elif bearish_count >= 3:
         score -= 2
-        reasons.append(f"MTF alignment: {bearish_count}/5 bearish")
+        reasons.append(f"MTF alignment: {bearish_count}/9 bearish")
     if structure["state"] == "BULLISH":
         score += 2
         reasons.append(f"Bullish {structure['event']}" if structure["event"] else "Bullish market structure")
@@ -467,7 +518,7 @@ def build_signal(candles, interval, mtf, structure, liquidity_events, fvg_zones,
         "reasons": reasons, "bullish_mtf": bullish_count, "bearish_mtf": bearish_count, "atr": round(atr, 4),
     }
 
-def smc_analysis(interval="15m"):
+def smc_analysis(interval="1m"):
     interval = normalize_tf(interval)
     candles = get_gold_with_live(interval)
     if len(candles) < 40:
@@ -524,7 +575,7 @@ def smc_analysis(interval="15m"):
 
 @app.route("/api")
 def api_full():
-    tf = normalize_tf(request.args.get("tf", "15m"))
+    tf = normalize_tf(request.args.get("tf", "1m"))
     try:
         return jsonify(smc_analysis(tf))
     except Exception as exc:
@@ -532,7 +583,7 @@ def api_full():
 
 @app.route("/api/tick")
 def api_tick():
-    tf = normalize_tf(request.args.get("tf", "15m"))
+    tf = normalize_tf(request.args.get("tf", "1m"))
     candles = get_gold_with_live(tf)
     if not candles:
         return jsonify({})
@@ -542,7 +593,7 @@ def api_tick():
 def api_health():
     return jsonify({
         "status": "online",
-        "engine": "GoldSMC Pro Spot - No Yahoo - Market Aware",
+        "engine": "GoldSMC Pro Spot - 9 TFs - No Yahoo - Market Aware",
         "symbol": SYMBOL,
         "market_open": is_market_open(),
         "server_time": now_utc_iso(),
@@ -554,6 +605,6 @@ def index():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print(" GOLD SMC PRO - NO YAHOO - MARKET AWARE")
+    print(" GOLD SMC PRO - 9 TFS - NO YAHOO - MARKET AWARE")
     print("=" * 60)
     app.run(host="0.0.0.0", port=5000, debug=True)
