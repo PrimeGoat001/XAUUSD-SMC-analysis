@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>GoldSMC Pro Terminal</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
@@ -13,6 +13,8 @@
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
     * { box-sizing: border-box; }
+    html, body { touch-action: pan-x pan-y; overscroll-behavior: none; }
+    #chart, #chartContainerBlock { touch-action: auto; }
   </style>
 </head>
 <body class="text-white w-full max-w-[1400px] mx-auto px-2 md:px-4 pb-8">
@@ -87,6 +89,9 @@
     <div id="chartContainerBlock" class="lg:col-span-3 bg-[#111119] border border-white/5 rounded-[24px] p-3 relative overflow-hidden flex flex-col">
       <div class="flex items-center justify-between px-2 pb-2">
         <div class="text-xs font-bold text-white/70 uppercase tracking-widest flex items-center gap-2">
+          <button id="expandChartBtn" onclick="toggleFullscreen()" class="w-7 h-7 rounded-full bg-white/10 hover:bg-yellow-400 hover:text-black border border-white/10 flex items-center justify-center transition text-white" title="Expand chart">
+            <i class="fa-solid fa-expand text-[11px]"></i>
+          </button>
           <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span> Gold Spot / U.S. Dollar (XAU/USD)
         </div>
         <div id="tfIndicatorBadge" class="text-[11px] text-yellow-400 font-mono bg-yellow-400/10 px-2.5 py-0.5 rounded-full">1M SMC Canvas</div>
@@ -188,15 +193,12 @@ function checkUpcomingNewsAlert(){
 }
 setInterval(()=>{let now=new Date();updateMarketSessionsAndClock();checkUpcomingNewsAlert();if(isGoldMarketClosedNow()){document.getElementById('candleCountdown').innerText="MARKET CLOSED";return;}let tfMinutes=currentTF==='1m'?1:currentTF==='5m'?5:currentTF==='15m'?15:currentTF==='30m'?30:currentTF==='45m'?45:currentTF==='1h'?60:currentTF==='2h'?120:currentTF==='4h'?240:1440;let secondsLeft=(tfMinutes*60)-((now.getMinutes()%tfMinutes)*60+now.getSeconds());if(currentTF==='2h'||currentTF==='4h'||currentTF==='1d'){let totalMins=now.getUTCHours()*60+now.getUTCMinutes();secondsLeft=(tfMinutes*60)-(totalMins%tfMinutes)*60-now.getUTCSeconds();}let m=Math.floor(secondsLeft/60),s=secondsLeft%60;document.getElementById('candleCountdown').innerText=`${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;},1000);
 function toggleNewsModal(open){document.getElementById('newsModal').classList.toggle('hidden',!open);if(open)loadNewsEvents();}
-
 function normalizeFrontendTF(tf){
-  // Map frontend extra TFs to backend VALID_TFS
   if(tf==='45m') return '30m';
   if(tf==='2h') return '1h';
   if(tf==='4h') return '1h';
   return tf;
 }
-
 function changeTimeframe(tf, btnElement){
   if(currentTF===tf&&!isInitialLoad) return;
   currentTF=tf;
@@ -275,17 +277,14 @@ function processChartData(d){
   }
   if(candleSeries&&d.candles&&d.candles.length>0){candleSeries.setData(d.candles);if(isInitialLoad){chart.timeScale().fitContent();isInitialLoad=false;}drawSMCStructure(d);}
 }
-
 function drawSMCStructure(data){
   if(!candleSeries) return;
   activePriceLines.forEach(line=>{try{candleSeries.removePriceLine(line);}catch(e){}});activePriceLines=[];
   let showBOS=document.getElementById('toggle-bos').checked;
   let showLiq=document.getElementById('toggle-liq').checked;
-  // ONLY SMC LINES - NO ENTRY/SL/TP EVER
   if(data.lines){
     data.lines.forEach(l=>{
       if((l.layer==='structure'&&!showBOS)||(l.layer==='liquidity'&&!showLiq)) return;
-      // Filter out any non-SMC lines just in case
       if(l.title && (l.title.includes('ENTRY')||l.title.includes('SL')||l.title.includes('TP'))) return;
       let pl=candleSeries.createPriceLine({price:l.price,color:l.color,lineWidth:1,lineStyle:l.lineStyle||0,axisLabelVisible:true,title:l.title,});
       activePriceLines.push(pl);
@@ -301,7 +300,6 @@ function drawSMCStructure(data){
   }
   requestAnimationFrame(renderSMCZonesCanvas);
 }
-
 function renderSMCZonesCanvas(){
   if(!currentData) return;
   let canvas=document.getElementById('drawCanvas');if(!canvas||!chart||!candleSeries) return;
@@ -330,6 +328,21 @@ async function updateRealtimeTick(){
     if(tick&&tick.price){let last=currentData.candles[currentData.candles.length-1];let updated={time:last.time,open:last.open,high:Math.max(last.high,tick.price),low:Math.min(last.low,tick.price),close:tick.price};candleSeries.update(updated);}
   }catch(e){}
 }
+function toggleFullscreen(){
+  const el = document.getElementById('chartContainerBlock');
+  if(!document.fullscreenElement){
+    if(el.requestFullscreen) el.requestFullscreen();
+    document.getElementById('expandChartBtn').innerHTML='<i class="fa-solid fa-compress text-[11px]"></i>';
+  } else {
+    if(document.exitFullscreen) document.exitFullscreen();
+    document.getElementById('expandChartBtn').innerHTML='<i class="fa-solid fa-expand text-[11px]"></i>';
+  }
+}
+document.addEventListener('fullscreenchange',()=>{
+  const btn=document.getElementById('expandChartBtn');
+  if(btn) btn.innerHTML = document.fullscreenElement? '<i class="fa-solid fa-compress text-[11px]"></i>' : '<i class="fa-solid fa-expand text-[11px]"></i>';
+  if(chart) setTimeout(()=>{ chart.applyOptions({ width: document.getElementById('chart').clientWidth, height: document.getElementById('chart').clientHeight }); },200);
+});
 updateMarketSessionsAndClock();loadNewsEvents();loadChartHistory();setInterval(updateRealtimeTick,1000);setInterval(loadChartHistory,30000);
 </script>
 </body>
