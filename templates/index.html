@@ -75,6 +75,11 @@
       height: 100% !important;
       width: 100% !important;
     }
+
+    #chartContainerBlock:fullscreen #fullscreenTimeframes,
+    #chartContainerBlock:-webkit-full-screen #fullscreenTimeframes {
+      display: flex !important;
+    }
   </style>
 </head>
 
@@ -359,6 +364,67 @@
     <div
       id="chartContainerBlock"
       class="lg:col-span-3 bg-[#111119] border border-white/5 rounded-[24px] p-3 relative overflow-hidden flex flex-col">
+
+      <!-- FULLSCREEN TIMEFRAMES -->
+      <div
+        id="fullscreenTimeframes"
+        class="hidden items-center gap-1 bg-[#111119] border border-white/10 rounded-xl p-1 mb-2 overflow-x-auto no-scrollbar shrink-0">
+
+        <button
+          onclick="changeTimeframe('1m', this)"
+          class="fullscreen-tf-btn px-3 py-1 rounded-full text-white/70 hover:text-yellow-400 transition whitespace-nowrap text-xs font-mono">
+          1M
+        </button>
+
+        <button
+          onclick="changeTimeframe('5m', this)"
+          class="fullscreen-tf-btn bg-yellow-400 text-black font-bold px-3 py-1 rounded-full transition whitespace-nowrap text-xs font-mono">
+          5M
+        </button>
+
+        <button
+          onclick="changeTimeframe('15m', this)"
+          class="fullscreen-tf-btn px-3 py-1 rounded-full text-white/70 hover:text-yellow-400 transition whitespace-nowrap text-xs font-mono">
+          15M
+        </button>
+
+        <button
+          onclick="changeTimeframe('30m', this)"
+          class="fullscreen-tf-btn px-3 py-1 rounded-full text-white/70 hover:text-yellow-400 transition whitespace-nowrap text-xs font-mono">
+          30M
+        </button>
+
+        <button
+          onclick="changeTimeframe('45m', this)"
+          class="fullscreen-tf-btn px-3 py-1 rounded-full text-white/70 hover:text-yellow-400 transition whitespace-nowrap text-xs font-mono">
+          45M
+        </button>
+
+        <button
+          onclick="changeTimeframe('1h', this)"
+          class="fullscreen-tf-btn px-3 py-1 rounded-full text-white/70 hover:text-yellow-400 transition whitespace-nowrap text-xs font-mono">
+          1H
+        </button>
+
+        <button
+          onclick="changeTimeframe('2h', this)"
+          class="fullscreen-tf-btn px-3 py-1 rounded-full text-white/70 hover:text-yellow-400 transition whitespace-nowrap text-xs font-mono">
+          2H
+        </button>
+
+        <button
+          onclick="changeTimeframe('4h', this)"
+          class="fullscreen-tf-btn px-3 py-1 rounded-full text-white/70 hover:text-yellow-400 transition whitespace-nowrap text-xs font-mono">
+          4H
+        </button>
+
+        <button
+          onclick="changeTimeframe('1d', this)"
+          class="fullscreen-tf-btn px-3 py-1 rounded-full text-white/70 hover:text-yellow-400 transition whitespace-nowrap text-xs font-mono">
+          1D
+        </button>
+
+      </div>
 
       <div class="flex items-center justify-between px-2 pb-2">
 
@@ -998,7 +1064,6 @@ setInterval(() => {
   let now = new Date();
 
   updateMarketSessionsAndClock();
-
   checkUpcomingNewsAlert();
 
 
@@ -2161,7 +2226,7 @@ function renderNewsAnalysis() {
                   <div
                     class="text-[10px] text-white/50 mt-2 font-mono select-all">
 
-                    Coming soon
+                    TLYjAsfyTMhLQ7sbdVjrdamT26YUffMpgK
 
                   </div>
 
@@ -2182,7 +2247,7 @@ function renderNewsAnalysis() {
                   <div
                     class="text-[10px] text-white/50 mt-2 font-mono select-all">
 
-                    Coming soon
+                    0142975787
 
                   </div>
 
@@ -2602,9 +2667,7 @@ function changeTimeframe(
 
 
   currentTF = tf;
-
   isInitialLoad = true;
-
   tfDataCache = {};
 
 
@@ -2654,19 +2717,51 @@ function changeTimeframe(
     });
 
 
-  if (btnElement) {
+  document
+    .querySelectorAll('.fullscreen-tf-btn')
+    .forEach(b => {
 
-    btnElement.classList.add(
-      'bg-yellow-400',
-      'text-black',
-      'font-bold'
-    );
+      b.classList.remove(
+        'bg-yellow-400',
+        'text-black',
+        'font-bold'
+      );
 
-    btnElement.classList.remove(
-      'text-white/70'
-    );
+      b.classList.add(
+        'text-white/70'
+      );
 
-  }
+    });
+
+
+  document
+    .querySelectorAll(
+      '.tf-btn, .fullscreen-tf-btn'
+    )
+    .forEach(b => {
+
+      const onclickText =
+        b.getAttribute('onclick') || '';
+
+      if (
+        onclickText.includes(
+          `'${tf}'`
+        )
+      ) {
+
+        b.classList.add(
+          'bg-yellow-400',
+          'text-black',
+          'font-bold'
+        );
+
+        b.classList.remove(
+          'text-white/70'
+        );
+
+      }
+
+    });
 
 
   document.getElementById(
