@@ -243,7 +243,6 @@ function changeTimeframe(tf, btnElement){
   document.querySelectorAll('.tf-btn').forEach(b=>{b.classList.remove('bg-yellow-400','text-black','font-bold');b.classList.add('text-white/70');});
   if(btnElement){btnElement.classList.add('bg-yellow-400','text-black','font-bold');btnElement.classList.remove('text-white/70');}
   document.getElementById('tfIndicatorBadge').innerText=`${tf.toUpperCase()} SMC Canvas`;
-  let loadingOverlay=document.getElementById('chartLoadingOverlay');loadingOverlay.classList.remove('opacity-0','pointer-events-none');loadingOverlay.classList.add('opacity-100');
   loadChartHistory();
 }
 function exportChartOnly(){let chartBlock=document.getElementById('chartContainerBlock');html2canvas(chartBlock,{backgroundColor:'#0b0b10',scale:2}).then(canvas=>{let link=document.createElement('a');link.download=`GoldSMC_Chart_${currentTF}_${new Date().toISOString().slice(0,10)}.png`;link.href=canvas.toDataURL('image/png');link.click();});}
@@ -258,13 +257,27 @@ async function loadNewsEvents(){
 async function loadChartHistory(){
   if(currentFetchController) currentFetchController.abort();
   currentFetchController=new AbortController();
+  
+  let loadingOverlay=document.getElementById('chartLoadingOverlay');
+  if(loadingOverlay){
+    loadingOverlay.classList.remove('opacity-0','pointer-events-none');
+    loadingOverlay.classList.add('opacity-100');
+  }
+
   try{
     let backendTF=normalizeFrontendTF(currentTF);
     let r=await fetch(`/api/analysis?tf=${backendTF}`,{signal:currentFetchController.signal});
     let d=await r.json();
     tfDataCache[currentTF]=d;
     processChartData(d);
-  }catch(e){if(e.name!=='AbortError') console.error("Chart Load Error:",e);}finally{let loadingOverlay=document.getElementById('chartLoadingOverlay');loadingOverlay.classList.remove('opacity-100');loadingOverlay.classList.add('opacity-0','pointer-events-none');}
+  }catch(e){
+    if(e.name!=='AbortError') console.error("Chart Load Error:",e);
+  }finally{
+    if(loadingOverlay){
+      loadingOverlay.classList.remove('opacity-100');
+      loadingOverlay.classList.add('opacity-0','pointer-events-none');
+    }
+  }
 }
 function processChartData(d){
   currentData=d;
