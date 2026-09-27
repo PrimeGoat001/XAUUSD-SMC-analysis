@@ -36,15 +36,15 @@
       display: flex!important;
       flex-direction: column!important;
     }
-    #chartContainerBlock:fullscreen .relative.w-full,
-    #chartContainerBlock:-webkit-full-screen .relative.w-full {
-      height: 100% !important;
-      flex: 1 !important;
+    #chartContainerBlock:fullscreen.relative.w-full,
+    #chartContainerBlock:-webkit-full-screen.relative.w-full {
+      height: 100%!important;
+      flex: 1!important;
     }
     #chartContainerBlock:fullscreen #chart,
     #chartContainerBlock:-webkit-full-screen #chart {
-      height: 100% !important;
-      width: 100% !important;
+      height: 100%!important;
+      width: 100%!important;
     }
   </style>
 </head>
@@ -305,12 +305,18 @@ function processChartData(d){
   `;
   const container=document.getElementById('chart');
   if(!chart){
-    chart=LightweightCharts.createChart(container,{width:container.clientWidth||container.parentElement.clientWidth||300,height:container.clientHeight||400,layout:{background:{color:'#111119'},textColor:'#888'},grid:{vertLines:{color:'#1a1a23'},horzLines:{color:'#1a1a23'}},timeScale:{timeVisible:true,secondsVisible:false},crosshair:{mode:LightweightCharts.CrosshairMode.Normal}});
+    const getW = ()=> container.clientWidth || container.parentElement.clientWidth || 300;
+    const getH = ()=> container.clientHeight || 400;
+    chart=LightweightCharts.createChart(container,{width:getW(),height:getH(),layout:{background:{color:'#111119'},textColor:'#888'},grid:{vertLines:{color:'#1a1a23'},horzLines:{color:'#1a1a23'}},timeScale:{timeVisible:true,secondsVisible:false},crosshair:{mode:LightweightCharts.CrosshairMode.Normal}});
     candleSeries=chart.addCandlestickSeries({upColor:'#00ff88',downColor:'#ff4444',borderVisible:false,wickUpColor:'#00ff88',wickDownColor:'#ff4444'});
     chart.timeScale().subscribeVisibleLogicalRangeChange(()=>{requestAnimationFrame(renderSMCZonesCanvas);});
     window.addEventListener('resize',()=>{if(chart&&container){chart.applyOptions({width:container.clientWidth,height:container.clientHeight});requestAnimationFrame(renderSMCZonesCanvas);}});
-    setTimeout(()=>{ if(chart){ chart.applyOptions({width:container.clientWidth,height:container.clientHeight}); chart.timeScale().fitContent(); requestAnimationFrame(renderSMCZonesCanvas); } },100);
-    setTimeout(()=>{ if(chart){ chart.applyOptions({width:container.clientWidth,height:container.clientHeight}); chart.timeScale().fitContent(); } },500);
+    const ro = new ResizeObserver(()=>{ if(chart){ chart.applyOptions({width:container.clientWidth, height:container.clientHeight}); chart.timeScale().fitContent(); requestAnimationFrame(renderSMCZonesCanvas);} });
+    ro.observe(container);
+    ro.observe(container.parentElement);
+    setTimeout(()=>{ if(chart){ chart.applyOptions({width:getW(),height:getH()}); chart.timeScale().fitContent(); } },50);
+    setTimeout(()=>{ if(chart){ chart.applyOptions({width:getW(),height:getH()}); chart.timeScale().fitContent(); } },300);
+    setTimeout(()=>{ if(chart){ chart.applyOptions({width:getW(),height:getH()}); chart.timeScale().fitContent(); } },1000);
   }
   if(candleSeries&&d.candles&&d.candles.length>0){candleSeries.setData(d.candles);if(isInitialLoad){chart.timeScale().fitContent();isInitialLoad=false;}drawSMCStructure(d);}
 }
