@@ -10,8 +10,8 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <style>
     body { background-color: #0b0b10; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow-x: hidden; }
-  .no-scrollbar::-webkit-scrollbar { display: none; }
-  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+ .no-scrollbar::-webkit-scrollbar { display: none; }
+ .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
     * { box-sizing: border-box; }
   </style>
 </head>
@@ -284,7 +284,14 @@
       if (currentTF === tf &&!isInitialLoad) return;
       currentTF = tf;
       isInitialLoad = true;
-      tfDataCache = {}; // clear cache to force fresh SMC recalc - fixes glitch
+      tfDataCache = {};
+      if (activePriceLines.length && candleSeries) {
+        activePriceLines.forEach(line => {
+          try { candleSeries.removePriceLine(line); } catch(e) {}
+        });
+        activePriceLines = [];
+        candleSeries.setMarkers([]);
+      }
       document.querySelectorAll('.tf-btn').forEach(b => {
         b.classList.remove('bg-yellow-400', 'text-black', 'font-bold');
         b.classList.add('text-white/70');
@@ -311,29 +318,10 @@
     }
 
     async function loadNewsEvents() {
-      try {
-        let res = await fetch('/api/news');
-        let events = await res.json();
-        cachedNewsEvents = events || [];
-        let listContainer = document.getElementById('newsModalList');
-        if (!cachedNewsEvents || cachedNewsEvents.length === 0) {
-          listContainer.innerHTML = '<div class="text-xs text-center text-white/40 font-mono py-4">No high-impact news scheduled.</div>';
-          return;
-        }
-        listContainer.innerHTML = cachedNewsEvents.map(e => `
-          <div class="bg-white/5 border border-white/5 rounded-xl p-3 flex items-center justify-between">
-            <div>
-              <div class="text-xs font-bold text-red-400 flex items-center gap-1.5">
-                <span class="w-2 h-2 rounded-full bg-red-500 animate-ping"></span> ${e.title}
-              </div>
-              <div class="text-[10px] text-white/50">${e.country} • High Impact Economic Release</div>
-            </div>
-            <div class="text-xs font-mono text-white/80">${e.date? e.date.substring(11, 16) : 'Today'} UTC</div>
-          </div>
-        `).join('');
-      } catch (e) {
-        console.error("News load error:", e);
-      }
+      // Your backend has no /api/news - keep modal empty without error
+      let listContainer = document.getElementById('newsModalList');
+      listContainer.innerHTML = '<div class="text-xs text-center text-white/40 font-mono py-4">News feed disabled - add /api/news route to backend if needed.</div>';
+      document.getElementById('newsAlertBanner').classList.add('hidden');
     }
 
     async function loadChartHistory() {
@@ -342,8 +330,11 @@
       }
       currentFetchController = new AbortController();
       try {
-        let r = await fetch(`/api?tf=${currentTF}`, { signal: currentFetchController.signal });
+        let r = await fetch(`/api/analysis?tf=${currentTF}`, { signal: currentFetchController.signal });
         let d = await r.json();
+        if (d.status === 'INSUFFICIENT_DATA') {
+          console.warn('Insufficient data for', currentTF);
+        }
         tfDataCache[currentTF] = d;
         processChartData(d);
       } catch (e) {
@@ -376,23 +367,23 @@
           <div class="text-[10px] bg-white/10 px-2.5 py-1 rounded-full font-mono">RSI ${d.rsi? d.rsi.toFixed(1) : '50.0'}</div>
         </div>
         <div class="mt-2 text-2xl font-black ${color} leading-tight">${d.signal}</div>
-        <div class="mt-1 text-xs font-mono text-white/60">$${d.price? d.price.toFixed(2) : '0.00'}</div>
+        <div class="mt-1 text-xs font-mono text-white/60">$${d.price? d.price.toFixed(2) : '0.00'} ${d.market_open===false? '<span class="text-red-400">(CLOSED)</span>' : ''}</div>
         <div class="mt-3 bg-white/5 border border-white/10 rounded-xl p-2.5 flex justify-between items-center text-xs">
           <span class="text-white/50 font-mono">P/D Zone:</span>
           ${pdZoneBadge}
         </div>
         <div class="mt-3 bg-gradient-to-br from-yellow-400/10 to-transparent border border-yellow-400/20 rounded-[16px] p-3">
           <div class="text-[10px] text-yellow-400 font-bold uppercase tracking-widest mb-1">MTF Rationale</div>
-          <div class="text-[11px] leading-relaxed text-white/80">${d.rationale}</div>
+          <div class="text-[11px] leading-relaxed text-white/80">${d.rationale || (d.reasons||[]).join(' • ')}</div>
         </div>
         <div class="mt-3 grid grid-cols-2 gap-2">
           <div class="bg-green-500/10 border border-green-500/20 rounded-xl p-2.5">
             <div class="text-[9px] text-green-300 uppercase font-bold">Demand Zone</div>
-            <div class="text-xs font-bold text-green-400">$${d.demand? d.demand.toFixed(2) : '0.00'}</div>
+            <div class="text-xs font-bold text-green-400">$${d.demand? d.demand.toFixed(2) : (d.pd_zones? d.pd_zones.swing_low.toFixed(2) : '0.00')}</div>
           </div>
           <div class="bg-red-500/10 border border-red-500/20 rounded-xl p-2.5">
             <div class="text-[9px] text-red-300 uppercase font-bold">Supply Zone</div>
-            <div class="text-xs font-bold text-red-400">$${d.supply? d.supply.toFixed(2) : '0.00'}</div>
+            <div class="text-xs font-bold text-red-400">$${d.supply? d.supply.toFixed(2) : (d.pd_zones? d.pd_zones.swing_high.toFixed(2) : '0.00')}</div>
           </div>
         </div>
         <div class="mt-3 flex flex-wrap gap-1">
@@ -435,7 +426,9 @@
 
     function drawSMCStructure(data) {
       if (!candleSeries) return;
-      activePriceLines.forEach(line => candleSeries.removePriceLine(line));
+      activePriceLines.forEach(line => {
+        try { candleSeries.removePriceLine(line); } catch(e) {}
+      });
       activePriceLines = [];
       let showBOS = document.getElementById('toggle-bos').checked;
       let showLiq = document.getElementById('toggle-liq').checked;
@@ -532,14 +525,22 @@
     }
 
     async function updateRealtimeTick() {
-      if (!candleSeries ||!currentData) return;
+      if (!candleSeries ||!currentData ||!currentData.candles) return;
       if (isGoldMarketClosedNow()) return;
       try {
-        let res = await fetch(`/api/tick?tf=${currentTF}`);
-        let candle = await res.json();
-        if (candle.market_open === false) return;
-        if (candle && candle.time) {
-          candleSeries.update(candle);
+        let res = await fetch(`/api/price?tf=${currentTF}`);
+        let tick = await res.json();
+        if (tick.market_open === false) return;
+        if (tick && tick.price) {
+          let last = currentData.candles[currentData.candles.length - 1];
+          let updated = {
+            time: last.time,
+            open: last.open,
+            high: Math.max(last.high, tick.price),
+            low: Math.min(last.low, tick.price),
+            close: tick.price
+          };
+          candleSeries.update(updated);
         }
       } catch (e) {}
     }
