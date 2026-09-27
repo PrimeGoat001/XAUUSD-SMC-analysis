@@ -8,27 +8,27 @@ from flask import Flask, jsonify, request, render_template
 app = Flask(__name__)
 
 # ============================================================
-# GOLD SMC PRO TERMINAL - WITH PRICE OFFSET CALIBRATION
+# GOLD SMC PRO TERMINAL - NO YAHOO - SPOT ONLY
 # ============================================================
 
-SYMBOL = "GC=F"
-YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/" + SYMBOL
+SYMBOL = "XAUUSD Spot"
+BINANCE_URL = "https://api.binance.com/api/v3/klines"
 
 PRICE_OFFSET = 0.00
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 }
 
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
-RANGE_MAP = {"1m": "1d", "5m": "5d", "15m": "5d", "1h": "1mo", "1d": "1y"}
-VALID_TFS = set(RANGE_MAP.keys())
+INTERVAL_MAP = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "1d": "1d"}
+VALID_TFS = set(INTERVAL_MAP.keys())
 
 _cache = {}
 _cache_lock = threading.Lock()
-CACHE_TTL = 2 # CHANGED: 15 -> 2 for live forming
+CACHE_TTL = 2
 
 def safe_float(value, default=0.0):
     try:
@@ -52,8 +52,20 @@ def normalize_tf(tf):
     tf = aliases.get(tf, tf)
     return tf if tf in VALID_TFS else "15m"
 
+def is_market_open():
+    now = datetime.now(timezone.utc)
+    day = now.weekday() # 0=Mon, 4=Fri, 5=Sat, 6=Sun
+    hour = now.hour
+    if day == 5: # Saturday = closed
+        return False
+    if day == 4 and hour >= 21: # Friday after 21 UTC
+        return False
+    if day == 6 and hour < 22: # Sunday before 22 UTC
+        return False
+    return True
+
 # ============================================================
-# DATA ENGINE (YAHOO FINANCE FETCH + OFFSET APPLICATION)
+# DATA ENGINE - BINANCE PAXG SPOT (NO YAHOO)
 # ============================================================
 
 def get_gold(interval="15m"):
@@ -66,49 +78,27 @@ def get_gold(interval="15m"):
             if now - timestamp < CACHE_TTL:
                 return cached_candles
 
-    tf_range = RANGE_MAP[interval]
+    bin_interval = INTERVAL_MAP.get(interval, "15m")
     params = {
-        "interval": interval,
-        "range": tf_range,
-        "includePrePost": "false",
-        "events": "div,splits",
+        "symbol": "PAXGUSDT",
+        "interval": bin_interval,
+        "limit": 250
     }
 
     try:
-        response = SESSION.get(YAHOO_URL, params=params, timeout=10)
+        response = SESSION.get(BINANCE_URL, params=params, timeout=10)
         response.raise_for_status()
-        payload = response.json()
-
-        chart = payload.get("chart", {})
-        results = chart.get("result")
-        if not results:
-            return []
-
-        result = results[0]
-        timestamps = result.get("timestamp", [])
-        quote = result.get("indicators", {}).get("quote", [{}])[0]
-
-        opens = quote.get("open", [])
-        highs = quote.get("high", [])
-        lows = quote.get("low", [])
-        closes = quote.get("close", [])
-        volumes = quote.get("volume", [])
+        data = response.json()
 
         candles = []
-        length = min(len(timestamps), len(opens), len(highs), len(lows), len(closes))
-
-        for i in range(length):
-            o, h, l, c = opens[i], highs[i], lows[i], closes[i]
-            if o is None or h is None or l is None or c is None:
-                continue
-
+        for k in data:
             candles.append({
-                "time": int(timestamps[i]),
-                "open": round(float(o) + PRICE_OFFSET, 2),
-                "high": round(float(h) + PRICE_OFFSET, 2),
-                "low": round(float(l) + PRICE_OFFSET, 2),
-                "close": round(float(c) + PRICE_OFFSET, 2),
-                "volume": int(volumes[i]) if i < len(volumes) and volumes[i] is not None else 0,
+                "time": int(k[0] / 1000),
+                "open": round(float(k[1]) + PRICE_OFFSET, 2),
+                "high": round(float(k[2]) + PRICE_OFFSET, 2),
+                "low": round(float(k[3]) + PRICE_OFFSET, 2),
+                "close": round(float(k[4]) + PRICE_OFFSET, 2),
+                "volume": int(float(k[5])) if k[5] else 0,
             })
 
         result_candles = candles[-250:]
@@ -118,43 +108,45 @@ def get_gold(interval="15m"):
 
         return result_candles
     except Exception as exc:
-        print(f"[DATA ERROR] {interval}: {exc}")
+        print(f"[BINANCE ERROR] {interval}: {exc}")
         return []
 
-# ============================================================
-# LIVE PRICE ENGINE - Makes chart move like OANDA (NEW)
-# ============================================================
 _last_live_price = 0
 _last_live_fetch = 0
 
 def get_oanda_live():
     global _last_live_price, _last_live_fetch
-    # Avoid spamming live API, cache 1 sec
     if time.time() - _last_live_fetch < 1 and _last_live_price:
         return _last_live_price
-    try:
-        # Free live gold spot - moves tick by tick
-        r = SESSION.get("https://api.gold-api.com/price/XAU", timeout=4)
-        if r.status_code == 200:
-            j = r.json()
-            p = float(j.get('price', 0))
-            if p > 1000:
-                _last_live_price = p
-                _last_live_fetch = time.time()
-                return _last_live_price
-    except Exception as e:
-        print(f"[LIVE ERROR] {e}")
+    urls = [
+        "https://api.gold-api.com/price/XAU",
+        "https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT"
+    ]
+    for url in urls:
+        try:
+            r = SESSION.get(url, timeout=4)
+            if r.status_code == 200:
+                j = r.json()
+                p = float(j.get('price', 0))
+                if p > 1000:
+                    _last_live_price = p
+                    _last_live_fetch = time.time()
+                    return _last_live_price
+        except:
+            continue
     return _last_live_price
 
 def get_gold_with_live(interval="15m"):
     candles = get_gold(interval)
     if not candles:
         return candles
+    # FREEZE WHEN MARKET CLOSED - no fake movement
+    if not is_market_open():
+        return candles
     live = get_oanda_live()
     if live and live > 100:
         live_cal = live + PRICE_OFFSET
         last = candles[-1]
-        # REAL CANDLE FORMING: update close/high/low live
         last["close"] = round(live_cal, 2)
         last["high"] = round(max(last["high"], live_cal), 2)
         last["low"] = round(min(last["low"], live_cal), 2)
@@ -477,7 +469,7 @@ def build_signal(candles, interval, mtf, structure, liquidity_events, fvg_zones,
 
 def smc_analysis(interval="15m"):
     interval = normalize_tf(interval)
-    candles = get_gold_with_live(interval) # CHANGED: use live
+    candles = get_gold_with_live(interval)
     if len(candles) < 40:
         return {
             "status": "INSUFFICIENT_DATA", "symbol": SYMBOL, "timeframe": interval,
@@ -527,6 +519,7 @@ def smc_analysis(interval="15m"):
         "pd_zones": pd, "mtf_matrix": mtf, "rationale": f"{interval.upper()} SMC Analysis complete.",
         "candles": candles, "markers": markers, "lines": lines, "zones": zones,
         "reasons": signal_data["reasons"], "liquidity": liquidity_events, "generated_at": now_utc_iso(),
+        "market_open": is_market_open()
     }
 
 @app.route("/api")
@@ -540,17 +533,18 @@ def api_full():
 @app.route("/api/tick")
 def api_tick():
     tf = normalize_tf(request.args.get("tf", "15m"))
-    candles = get_gold_with_live(tf) # CHANGED: use live
+    candles = get_gold_with_live(tf)
     if not candles:
         return jsonify({})
-    return jsonify(candles[-1])
+    return jsonify({**candles[-1], "market_open": is_market_open()})
 
 @app.route("/api/health")
 def api_health():
     return jsonify({
         "status": "online",
-        "engine": "GoldSMC Pro Pydroid Edition + Live Forming",
+        "engine": "GoldSMC Pro Spot - No Yahoo - Market Aware",
         "symbol": SYMBOL,
+        "market_open": is_market_open(),
         "server_time": now_utc_iso(),
     })
 
@@ -560,6 +554,6 @@ def index():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print(" GOLD SMC PRO TERMINAL - LIVE FORMING EDITION")
+    print(" GOLD SMC PRO - NO YAHOO - MARKET AWARE")
     print("=" * 60)
     app.run(host="0.0.0.0", port=5000, debug=True)
