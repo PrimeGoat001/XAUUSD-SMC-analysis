@@ -1,3 +1,4 @@
+import os
 import time
 import threading
 from datetime import datetime, timezone
@@ -6,42 +7,46 @@ from flask import Flask, jsonify, request, render_template
 
 app = Flask(__name__)
 
-SYMBOL = "XAUUSD Spot"
+# ============================================================
+# GOLD SMC PRO - YAHOO ENGINE THAT WORKS - 9 TFs
+# ============================================================
+
+SYMBOL = "GC=F"
+YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/" + SYMBOL
 PRICE_OFFSET = 0.00
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+}
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
-# Try multiple Binance endpoints - fixes 451 block
-BINANCE_URLS = [
-    "https://data-api.binance.vision/api/v3/klines",
-    "https://api.binance.com/api/v3/klines",
-    "https://api1.binance.com/api/v3/klines",
-]
-
-INTERVAL_MAP = {
-    "1m": "1m", "5m": "5m", "15m": "15m",
-    "30m": "30m", "45m": "45m",
-    "1h": "1h", "2h": "2h", "4h": "4h", "1d": "1d"
+# Yahoo only supports these directly
+RANGE_MAP = {
+    "1m": "1d", "5m": "5d", "15m": "5d",
+    "30m": "1mo", "45m": "1mo",
+    "1h": "1mo", "2h": "1mo", "4h": "3mo", "1d": "1y"
 }
-VALID_TFS = set(INTERVAL_MAP.keys())
+YAHOO_INTERVAL = {
+    "1m": "1m", "5m": "5m", "15m": "15m",
+    "30m": "30m", "45m": "15m",
+    "1h": "60m", "2h": "60m", "4h": "60m", "1d": "1d"
+}
+VALID_TFS = set(RANGE_MAP.keys())
 
 _cache = {}
 _cache_lock = threading.Lock()
 CACHE_TTL = 2
 
-def safe_float(v, d=0.0):
+def safe_float(v,d=0.0):
     try: return float(v) if v is not None else d
     except: return d
-
-def clamp(v, mn, mx): return max(mn, min(mx, v))
+def clamp(v,mn,mx): return max(mn, min(mx, v))
 def now_utc_iso(): return datetime.now(timezone.utc).isoformat()
 
 def normalize_tf(tf):
     tf = str(tf or "1m").lower().strip()
-    aliases = {"1":"1m","5":"5m","15":"15m","30":"30m","45":"45m","60":"1h","1hr":"1h","2hr":"2h","4hr":"4h","hour":"1h","day":"1d"}
+    aliases = {"1":"1m","5":"5m","15":"15m","30":"30m","45":"45m","60":"1h","1hr":"1h","2hr":"2h","4hr":"4h","day":"1d"}
     tf = aliases.get(tf, tf)
     return tf if tf in VALID_TFS else "1m"
 
@@ -69,81 +74,67 @@ def aggregate_candles(candles, factor):
         })
     return agg
 
-def fetch_binance_klines(symbol, interval, limit):
-    for url in BINANCE_URLS:
-        try:
-            r = SESSION.get(url, params={"symbol":symbol,"interval":interval,"limit":limit}, timeout=10)
-            if r.status_code==200:
-                data=r.json()
-                if isinstance(data,list) and len(data)>0:
-                    return data
-        except Exception as e:
-            print(f"Fail {url}: {e}")
-            continue
-    return None
-
 def get_gold(interval="1m"):
     interval = normalize_tf(interval)
     now=time.time()
     with _cache_lock:
         if interval in _cache:
-            c,t = _cache[interval]
+            c,t=_cache[interval]
             if now-t < CACHE_TTL:
                 return c
 
-    # 45m custom
-    if interval=="45m":
-        data = fetch_binance_klines("PAXGUSDT","15m",750)
-        if not data: return []
-        candles=[]
-        for k in data:
+    yahoo_tf = YAHOO_INTERVAL.get(interval,"1m")
+    tf_range = RANGE_MAP.get(interval,"1d")
+    params = {"interval":yahoo_tf,"range":tf_range,"includePrePost":"false","events":"div,splits"}
+    try:
+        r=SESSION.get(YAHOO_URL, params=params, timeout=10)
+        r.raise_for_status()
+        payload=r.json()
+        chart=payload.get("chart",{}); results=chart.get("result")
+        if not results: return []
+        result=results[0]
+        timestamps=result.get("timestamp",[])
+        quote=result.get("indicators",{}).get("quote",[{}])[0]
+        opens,highs,lows,closes,volumes=quote.get("open",[]),quote.get("high",[]),quote.get("low",[]),quote.get("close",[]),quote.get("volume",[])
+        candles=[]; length=min(len(timestamps),len(opens),len(highs),len(lows),len(closes))
+        for i in range(length):
+            o,h,l,c=opens[i],highs[i],lows[i],closes[i]
+            if o is None or h is None or l is None or c is None: continue
             candles.append({
-                "time":int(k[0]/1000),
-                "open":round(float(k[1])+PRICE_OFFSET,2),
-                "high":round(float(k[2])+PRICE_OFFSET,2),
-                "low":round(float(k[3])+PRICE_OFFSET,2),
-                "close":round(float(k[4])+PRICE_OFFSET,2),
-                "volume":int(float(k[5])) if k[5] else 0,
+                "time":int(timestamps[i]),
+                "open":round(float(o)+PRICE_OFFSET,2),
+                "high":round(float(h)+PRICE_OFFSET,2),
+                "low":round(float(l)+PRICE_OFFSET,2),
+                "close":round(float(c)+PRICE_OFFSET,2),
+                "volume":int(volumes[i]) if i<len(volumes) and volumes[i] is not None else 0,
             })
-        res = aggregate_candles(candles,3)[-250:]
+        # Build custom TFs
+        if interval=="45m":
+            candles = aggregate_candles(candles, 3)
+        elif interval=="2h":
+            candles = aggregate_candles(candles, 2)
+        elif interval=="4h":
+            candles = aggregate_candles(candles, 4)
+
+        res = sorted(candles, key=lambda x:x["time"])[-250:]
         with _cache_lock: _cache[interval]=(res,time.time())
         return res
-
-    bin_interval = INTERVAL_MAP.get(interval,"1m")
-    data = fetch_binance_klines("PAXGUSDT", bin_interval, 250)
-    if not data:
-        print(f"NO DATA for {interval}")
+    except Exception as exc:
+        print(f"[YAHOO ERROR] {interval}: {exc}")
         return []
-    candles=[]
-    for k in data:
-        candles.append({
-            "time":int(k[0]/1000),
-            "open":round(float(k[1])+PRICE_OFFSET,2),
-            "high":round(float(k[2])+PRICE_OFFSET,2),
-            "low":round(float(k[3])+PRICE_OFFSET,2),
-            "close":round(float(k[4])+PRICE_OFFSET,2),
-            "volume":int(float(k[5])) if k[5] else 0,
-        })
-    res = sorted(candles, key=lambda x:x["time"])[-250:]
-    with _cache_lock: _cache[interval]=(res,time.time())
-    return res
 
 _last_live_price=0
 _last_live_fetch=0
 def get_oanda_live():
     global _last_live_price,_last_live_fetch
     if time.time()-_last_live_fetch<1 and _last_live_price: return _last_live_price
-    for url in ["https://api.gold-api.com/price/XAU","https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT","https://data-api.binance.vision/api/v3/ticker/price?symbol=PAXGUSDT"]:
-        try:
-            r=SESSION.get(url,timeout=4)
-            if r.status_code==200:
-                j=r.json()
-                p=float(j.get('price',0))
-                if p>1000:
-                    _last_live_price=p
-                    _last_live_fetch=time.time()
-                    return p
-        except: continue
+    try:
+        r=SESSION.get("https://api.gold-api.com/price/XAU", timeout=4)
+        if r.status_code==200:
+            j=r.json(); p=float(j.get('price',0))
+            if p>1000:
+                _last_live_price=p; _last_live_fetch=time.time(); return p
+    except: pass
     return _last_live_price
 
 def get_gold_with_live(interval="1m"):
@@ -152,8 +143,7 @@ def get_gold_with_live(interval="1m"):
     if not is_market_open(): return candles
     live=get_oanda_live()
     if live and live>100:
-        lc=live+PRICE_OFFSET
-        last=candles[-1]
+        lc=live+PRICE_OFFSET; last=candles[-1]
         last["close"]=round(lc,2)
         last["high"]=round(max(last["high"],lc),2)
         last["low"]=round(min(last["low"],lc),2)
@@ -214,8 +204,7 @@ def detect_structure(candles):
     if len(candles)<20: return {"state":"NEUTRAL","event":None,"level":None,"index":None}
     sh=find_swing_highs(candles); sl=find_swing_lows(candles)
     if not sh or not sl: return {"state":"NEUTRAL","event":None,"level":None,"index":None}
-    lhi,lli=sh[-1],sl[-1]
-    lh,ll=candles[lhi]["high"],candles[lli]["low"]
+    lhi,lli=sh[-1],sl[-1]; lh,ll=candles[lhi]["high"],candles[lli]["low"]
     prev="NEUTRAL"
     if len(sh)>=2 and len(sl)>=2:
         if candles[sh[-1]]["high"]>candles[sh[-2]]["high"] and candles[sl[-1]]["low"]>candles[sl[-2]]["low"]: prev="BULLISH"
@@ -225,11 +214,10 @@ def detect_structure(candles):
     if close<ll: return {"state":"BEARISH","event":"CHoCH" if prev=="BULLISH" else "BOS","level":ll,"index":lli}
     return {"state":prev,"event":None,"level":lh if prev=="BULLISH" else ll if prev=="BEARISH" else None,"index":lhi if prev=="BULLISH" else lli if prev=="BEARISH" else None}
 
-def detect_liquidity(candles, tol=0.12):
+def detect_liquidity(candles,tol=0.12):
     if len(candles)<30: return [],[]
     atr=calculate_atr(candles) or 1.0; tolerance=atr*tol
-    sh=find_swing_highs(candles); sl=find_swing_lows(candles)
-    lines,events=[],[]
+    sh=find_swing_highs(candles); sl=find_swing_lows(candles); lines,events=[],[]
     if len(sh)>=2:
         a,b=sh[-1],sh[-2]; p1,p2=candles[a]["high"],candles[b]["high"]
         if abs(p1-p2)<=tolerance:
@@ -259,10 +247,9 @@ def is_zone_violated(zone,candles,idx):
 def detect_fvgs(candles,max_zones=6):
     active=[]
     if len(candles)<5: return active
-    atr=calculate_atr(candles) or 1.0; ming=atr*0.10
-    start=max(2,len(candles)-80); cands=[]
+    atr=calculate_atr(candles) or 1.0; ming=atr*0.10; start=max(2,len(candles)-80); cands=[]
     for i in range(start,len(candles)):
-        left,middle,right=candles[i-2],candles[i-1],candles[i]
+        left,right=candles[i-2],candles[i]
         if right["low"]>left["high"]:
             gap=right["low"]-left["high"]
             if gap>=ming:
@@ -279,8 +266,7 @@ def detect_fvgs(candles,max_zones=6):
 def detect_order_blocks(candles,max_zones=6):
     active=[]
     if len(candles)<10: return active
-    atr=calculate_atr(candles) or 1.0; avg_body=sum(abs(c["close"]-c["open"]) for c in candles[-20:])/min(20,len(candles))
-    start=max(2,len(candles)-80); cands=[]
+    atr=calculate_atr(candles) or 1.0; avg_body=sum(abs(c["close"]-c["open"]) for c in candles[-20:])/min(20,len(candles)); start=max(2,len(candles)-80); cands=[]
     for i in range(start,len(candles)-2):
         cur=candles[i]; nxt=candles[i+1]; nb=abs(nxt["close"]-nxt["open"])
         if not (nb>avg_body*1.25 and nb>atr*0.35): continue
@@ -295,13 +281,11 @@ def detect_order_blocks(candles,max_zones=6):
 
 def calculate_pd(candles):
     lb=min(80,len(candles)); recent=candles[-lb:]
-    sh=max(c["high"] for c in recent); sl=min(c["low"] for c in recent)
-    eq=(sh+sl)/2; price=candles[-1]["close"]
+    sh=max(c["high"] for c in recent); sl=min(c["low"] for c in recent); eq=(sh+sl)/2; price=candles[-1]["close"]
     return {"swing_high":round(sh,2),"swing_low":round(sl,2),"equilibrium":round(eq,2),"current_zone":"PREMIUM" if price>eq else "DISCOUNT"}
 
 def build_signal(candles,interval,mtf,structure,liq_events,fvg_zones,ob_zones,pd):
-    price=candles[-1]["close"]; rsi=calculate_rsi([c["close"] for c in candles])
-    score=0; reasons=[]
+    price=candles[-1]["close"]; rsi=calculate_rsi([c["close"] for c in candles]); score=0; reasons=[]
     bull=sum(1 for v in mtf.values() if v=="BULLISH"); bear=sum(1 for v in mtf.values() if v=="BEARISH")
     if bull>=3: score+=2; reasons.append(f"MTF: {bull}/9 bullish")
     elif bear>=3: score-=2; reasons.append(f"MTF: {bear}/9 bearish")
@@ -328,10 +312,8 @@ def smc_analysis(interval="1m"):
     interval=normalize_tf(interval)
     candles=get_gold_with_live(interval)
     if len(candles)<40:
-        return {"status":"INSUFFICIENT_DATA","symbol":SYMBOL,"timeframe":interval,"price":0,"signal":"WAIT","score":0,"confidence":0,"rsi":50,"candles":[],"markers":[],"lines":[],"zones":[],"reasons":[f"Binance blocked? Got {len(candles)} candles. Check server logs."],"mtf_matrix":{},"pd_zones":{},"market_open":is_market_open()}
-    price=candles[-1]["close"]; mtf=build_mtf_matrix(); struct=detect_structure(candles)
-    liq_lines,liq_events=detect_liquidity(candles); fvg=detect_fvgs(candles); ob=detect_order_blocks(candles); pd=calculate_pd(candles)
-    sig=build_signal(candles,interval,mtf,struct,liq_events,fvg,ob,pd)
+        return {"status":"INSUFFICIENT_DATA","symbol":SYMBOL,"timeframe":interval,"price":0,"signal":"WAIT","score":0,"confidence":0,"rsi":50,"candles":[],"markers":[],"lines":[],"zones":[],"reasons":["No data"],"mtf_matrix":{},"pd_zones":{},"market_open":is_market_open()}
+    price=candles[-1]["close"]; mtf=build_mtf_matrix(); struct=detect_structure(candles); liq_lines,liq_events=detect_liquidity(candles); fvg=detect_fvgs(candles); ob=detect_order_blocks(candles); pd=calculate_pd(candles); sig=build_signal(candles,interval,mtf,struct,liq_events,fvg,ob,pd)
     lines=[]
     if struct["level"] is not None:
         lines.append({"price":struct["level"],"color":"#00ff88" if struct["state"]=="BULLISH" else "#ff4444","title":struct["event"] or "STRUCTURE","lineStyle":0,"layer":"bos_choch"})
@@ -358,11 +340,12 @@ def api_tick():
 
 @app.route("/api/health")
 def api_health():
-    return jsonify({"status":"online","engine":"GoldSMC Pro 9TF Fixed","symbol":SYMBOL,"market_open":is_market_open(),"server_time":now_utc_iso()})
+    return jsonify({"status":"online","engine":"GoldSMC Yahoo 9TFs","symbol":SYMBOL,"market_open":is_market_open(),"server_time":now_utc_iso()})
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
 if __name__=="__main__":
+    print(" GOLD SMC - YAHOO 9TFs - MARKET AWARE")
     app.run(host="0.0.0.0",port=5000,debug=True)
