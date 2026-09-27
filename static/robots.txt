@@ -1,3 +1,1 @@
-User-agent: *
-Allow: /
-Sitemap: https://www.xauusd-smc-analysis.publicvm.com/sitemap.xml
+
