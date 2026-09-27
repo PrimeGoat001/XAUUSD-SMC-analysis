@@ -12,7 +12,7 @@ PRICE_OFFSET = -35.26
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
-RANGE_MAP = {"1m": "1d", "5m": "5d", "15m": "5d", "30m": "5d", "1h": "1mo", "1d": "1y"}
+RANGE_MAP = {"1m": "5d", "5m": "60d", "15m": "60d", "30m": "60d", "1h": "1mo", "1d": "1y"}
 VALID_TFS = {"1m", "5m", "15m", "30m", "1h", "1d"}
 YAHOO_INTERVAL_MAP = {"1m": "1m","5m": "5m","15m": "15m","30m": "30m","1h": "60m","1d": "1d"}
 _cache = {}
@@ -32,14 +32,14 @@ def is_market_open():
     if d==6 and h<22: return False
     return True
 def normalize_tf(tf):
-    tf=str(tf or "15m").lower().strip()
+    tf=str(tf or "5m").lower().strip()
     aliases={"1":"1m","1m":"1m","5":"5m","5m":"5m","15":"15m","15m":"15m","30":"30m","30m":"30m","30min":"30m","60":"1h","1h":"1h","1hr":"1h","hour":"1h","2h":"1h","4h":"1h","45m":"30m","day":"1d","daily":"1d","1d":"1d"}
     tf=aliases.get(tf,tf)
-    return tf if tf in VALID_TFS else "15m"
+    return tf if tf in VALID_TFS else "5m"
 
 def get_yahoo_raw_close():
     try:
-        params={"interval":"1m","range":"1d","includePrePost":"false"}
+        params={"interval":"5m","range":"5d","includePrePost":"false"}
         r=SESSION.get(YAHOO_URL,params=params,timeout=4)
         r.raise_for_status()
         closes=r.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"]
@@ -72,7 +72,7 @@ def auto_sync_loop():
         except: time.sleep(2)
 threading.Thread(target=auto_sync_loop,daemon=True).start()
 
-def get_gold(interval="15m"):
+def get_gold(interval="5m"):
     interval=normalize_tf(interval)
     now=time.time()
     with _cache_lock:
@@ -95,6 +95,22 @@ def get_gold(interval="15m"):
             o,h,l,c=opens[i],highs[i],lows[i],closes[i]
             if None in (o,h,l,c): continue
             candles.append({"time":int(timestamps[i]),"open":round(float(o)+PRICE_OFFSET,2),"high":round(float(h)+PRICE_OFFSET,2),"low":round(float(l)+PRICE_OFFSET,2),"close":round(float(c)+PRICE_OFFSET,2),"volume":int(volumes[i]) if i<len(volumes) and volumes[i] is not None else 0})
+        
+        # Robust Fallback if 1m returns empty due to Yahoo intraday limits
+        if not candles and interval == "1m":
+            params_fallback = {"interval": "5m", "range": "5d", "includePrePost": "false", "events": "div,splits"}
+            response_fb = SESSION.get(YAHOO_URL, params=params_fallback, timeout=5)
+            response_fb.raise_for_status()
+            result_fb = response_fb.json()["chart"]["result"][0]
+            timestamps = result_fb.get("timestamp", [])
+            quote_fb = result_fb.get("indicators", {}).get("quote", [{}])[0]
+            opens, highs, lows, closes, volumes = quote_fb.get("open", []), quote_fb.get("high", []), quote_fb.get("low", []), quote_fb.get("close", []), quote_fb.get("volume", [])
+            length = min(len(timestamps), len(opens), len(highs), len(lows), len(closes))
+            for i in range(length):
+                o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+                if None in (o, h, l, c): continue
+                candles.append({"time": int(timestamps[i]), "open": round(float(o) + PRICE_OFFSET, 2), "high": round(float(h) + PRICE_OFFSET, 2), "low": round(float(l) + PRICE_OFFSET, 2), "close": round(float(c) + PRICE_OFFSET, 2), "volume": int(volumes[i]) if i < len(volumes) and volumes[i] is not None else 0})
+
         result_candles=candles[-250:]
         with _cache_lock: _cache[interval]=(result_candles,time.time())
         return result_candles
@@ -118,7 +134,7 @@ def get_oanda_live():
     except: pass
     return _last_live_price
 
-def get_gold_with_live(interval="15m"):
+def get_gold_with_live(interval="5m"):
     candles=get_gold(interval)
     if not candles or not is_market_open(): return candles
     live=get_oanda_live()
@@ -296,7 +312,7 @@ def build_signal(candles,interval,mtf,structure,liq_events,fvg_zones,ob_zones,pd
     atr=calculate_atr(candles) or max(price*0.001,0.10)
     return {"signal":sig,"score":score,"confidence":round(clamp(50+abs(score)*5,50,95)),"rsi":rsi,"reasons":reasons,"bullish_mtf":bull,"bearish_mtf":bear,"atr":round(atr,4)}
 
-def smc_analysis(interval="15m"):
+def smc_analysis(interval="5m"):
     interval=normalize_tf(interval)
     static_candles=get_gold(interval)
     live_candles=get_gold_with_live(interval)
@@ -340,12 +356,12 @@ def api_news():
 @app.route("/")
 def index(): return render_template("index.html")
 @app.route("/api/candles")
-def api_candles(): return jsonify(get_gold_with_live(request.args.get("tf","15m")))
+def api_candles(): return jsonify(get_gold_with_live(request.args.get("tf","5m")))
 @app.route("/api/analysis")
-def api_analysis(): return jsonify(smc_analysis(request.args.get("tf","15m")))
+def api_analysis(): return jsonify(smc_analysis(request.args.get("tf","5m")))
 @app.route("/api/price")
 def api_price():
-    tf=request.args.get("tf","15m")
+    tf=request.args.get("tf","5m")
     candles=get_gold_with_live(tf)
     if not candles: return jsonify({"price":0,"market_open":is_market_open(),"offset":PRICE_OFFSET})
     return jsonify({"price":candles[-1]["close"],"market_open":is_market_open(),"timestamp":now_utc_iso(),"offset":PRICE_OFFSET})
