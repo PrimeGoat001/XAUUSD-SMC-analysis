@@ -336,6 +336,7 @@ def smc_analysis(interval="5m"):
     for ev in liq_events: markers.append({"time":ev["time"],"label":ev["label"]})
     return {"status":"OK","symbol":SYMBOL,"timeframe":interval,"price":price,"signal":signal_data["signal"],"score":signal_data["score"],"confidence":signal_data["confidence"],"rsi":signal_data["rsi"],"candles":live_candles if live_candles else static_candles,"markers":markers,"lines":lines,"zones":zones,"reasons":signal_data["reasons"],"mtf_matrix":mtf,"pd_zones":pd,"atr":signal_data["atr"],"bullish_mtf":signal_data["bullish_mtf"],"bearish_mtf":signal_data["bearish_mtf"],"market_open":is_market_open(),"timestamp":now_utc_iso(),"offset":PRICE_OFFSET}
 
+
 # ============================================================
 # ===================== NEWS MACHINE =========================
 # ============================================================
@@ -368,10 +369,12 @@ _nm_research_cache = {}
 _nm_research_cache_time = {}
 _nm_lock = threading.Lock()
 
+
 def _nm_db():
     conn = _nm_sqlite3.connect(NM_DB, timeout=10)
     conn.row_factory = _nm_sqlite3.Row
     return conn
+
 
 def _nm_init_db():
     try:
@@ -440,7 +443,9 @@ def _nm_init_db():
     except Exception as exc:
         print(f"[NEWS MACHINE DB] {exc}")
 
+
 _nm_init_db()
+
 
 def _nm_parse_time(value):
     try:
@@ -462,11 +467,13 @@ def _nm_parse_time(value):
     except Exception:
         return None
 
+
 def _nm_event_key(event):
     title = str(event.get("title", "")).strip().lower()
     date = str(event.get("date", "")).strip()
     raw = f"{title}|{date}"
     return _nm_re.sub(r"[^a-z0-9|]+", "-", raw)
+
 
 def _nm_safe_number(value):
     try:
@@ -490,9 +497,11 @@ def _nm_safe_number(value):
     except Exception:
         return None
 
+
 def _nm_is_usd_event(event):
     country = str(event.get("country", "")).upper()
     return country in {"USD", "US", "UNITED STATES", "USA"}
+
 
 def _nm_get_calendar():
     global _nm_last_calendar, _nm_calendar_time
@@ -509,7 +518,7 @@ def _nm_get_calendar():
             timeout=5
         )
 
-        if response.status_code!= 200:
+        if response.status_code != 200:
             return list(_nm_last_calendar)
 
         data = response.json()
@@ -519,7 +528,7 @@ def _nm_get_calendar():
             impact = raw.get("impact", "")
             country = raw.get("country", "")
 
-            if str(impact).lower()!= "high":
+            if str(impact).lower() != "high":
                 continue
 
             if not _nm_is_usd_event({"country": country}):
@@ -546,6 +555,7 @@ def _nm_get_calendar():
         print(f"[NEWS MACHINE CALENDAR] {exc}")
         return list(_nm_last_calendar)
 
+
 def _nm_google_news(query):
     try:
         encoded = _nm_urlparse.quote_plus(query)
@@ -557,7 +567,7 @@ def _nm_google_news(query):
 
         response = SESSION.get(url, timeout=7)
 
-        if response.status_code!= 200:
+        if response.status_code != 200:
             return []
 
         root = _nm_ET.fromstring(response.text)
@@ -588,6 +598,7 @@ def _nm_google_news(query):
         print(f"[NEWS MACHINE RESEARCH] {exc}")
         return []
 
+
 def _nm_x_search(query):
     token = os.environ.get("X_BEARER_TOKEN", "").strip()
 
@@ -614,7 +625,7 @@ def _nm_x_search(query):
             timeout=7
         )
 
-        if response.status_code!= 200:
+        if response.status_code != 200:
             print(
                 f"[NEWS MACHINE X] API returned "
                 f"{response.status_code}"
@@ -637,6 +648,7 @@ def _nm_x_search(query):
         print(f"[NEWS MACHINE X] {exc}")
         return []
 
+
 _NM_BULLISH_WORDS = {
     "bullish", "surge", "surges", "rally", "rallies", "higher",
     "rise", "rising", "strong", "hawkish", "inflation",
@@ -649,6 +661,7 @@ _NM_BEARISH_WORDS = {
     "weak", "selloff", "sell-off", "hawkish dollar",
     "strong dollar", "higher yields", "yield surge", "rate hike"
 }
+
 
 def _nm_sentiment(text):
     text = str(text or "").lower()
@@ -669,6 +682,7 @@ def _nm_sentiment(text):
         return 0.0
 
     return round((bull - bear) / total, 3)
+
 
 def _nm_research_event(event):
     key = _nm_event_key(event)
@@ -751,7 +765,7 @@ def _nm_research_event(event):
                 INSERT INTO news_research
                 (query, source, title, url, published, summary,
                  sentiment, created_at)
-                VALUES (?,?,?,?,?,?,?,?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 title,
                 "Google News",
@@ -773,6 +787,7 @@ def _nm_research_event(event):
         print(f"[NEWS MACHINE RESEARCH DB] {exc}")
 
     return result
+
 
 def _nm_market_context():
     try:
@@ -819,6 +834,7 @@ def _nm_market_context():
         print(f"[NEWS MACHINE MARKET] {exc}")
         return {"available": False}
 
+
 def _nm_find_historical_matches(event):
     title = str(event.get("title", "")).lower()
 
@@ -861,6 +877,7 @@ def _nm_find_historical_matches(event):
             matches.append(dict(row))
 
     return matches[:30]
+
 
 def _nm_historical_bias(matches):
     if not matches:
@@ -908,6 +925,7 @@ def _nm_historical_bias(matches):
         "sample": total
     }
 
+
 def _nm_macro_context(event):
     title = str(event.get("title", "")).lower()
 
@@ -947,6 +965,7 @@ def _nm_macro_context(event):
         "direction": direction,
         "strength": 0.20
     }
+
 
 def _nm_make_prediction(event):
     research = _nm_research_event(event)
@@ -1161,6 +1180,7 @@ def _nm_make_prediction(event):
         ]
     }
 
+
 def _nm_get_prediction(event_key):
     try:
         conn = _nm_db()
@@ -1168,7 +1188,7 @@ def _nm_get_prediction(event_key):
         row = conn.execute("""
             SELECT *
             FROM news_predictions
-            WHERE event_key =?
+            WHERE event_key = ?
         """, (event_key,)).fetchone()
 
         conn.close()
@@ -1177,6 +1197,7 @@ def _nm_get_prediction(event_key):
 
     except Exception:
         return None
+
 
 def _nm_save_prediction(event, prediction):
     try:
@@ -1210,7 +1231,7 @@ def _nm_save_prediction(event, prediction):
                 price_before,
                 created_at
             )
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             event_key,
             event.get("title", ""),
@@ -1246,6 +1267,7 @@ def _nm_save_prediction(event, prediction):
         print(
             f"[NEWS MACHINE SAVE] {exc}"
         )
+
 
 def _nm_capture_outcomes():
     try:
@@ -1341,13 +1363,13 @@ def _nm_capture_outcomes():
             conn.execute("""
                 UPDATE news_predictions
                 SET
-                    price_5m =?,
-                    price_15m =?,
-                    price_30m =?,
-                    outcome =?,
-                    aligned =?,
-                    completed_at =?
-                WHERE id =?
+                    price_5m = ?,
+                    price_15m = ?,
+                    price_30m = ?,
+                    outcome = ?,
+                    aligned = ?,
+                    completed_at = ?
+                WHERE id = ?
             """, (
                 after_5,
                 after_15,
@@ -1371,7 +1393,7 @@ def _nm_capture_outcomes():
                     direction,
                     created_at
                 )
-                VALUES (?,?,?,?,?,?,?,?,?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 row["event_key"],
                 row["event_title"],
@@ -1392,6 +1414,7 @@ def _nm_capture_outcomes():
             f"[NEWS MACHINE OUTCOME] {exc}"
         )
 
+
 def _nm_get_current():
     events = _nm_get_calendar()
     now = datetime.now(timezone.utc)
@@ -1407,7 +1430,7 @@ def _nm_get_current():
         if not event_time:
             continue
 
-        if event_time.date()!= now.date():
+        if event_time.date() != now.date():
             continue
 
         high_events_today.append(
@@ -1567,6 +1590,7 @@ def _nm_get_current():
         "server_time": now_utc_iso()
     }
 
+
 def _nm_statistics():
     try:
         conn = _nm_db()
@@ -1629,6 +1653,7 @@ def _nm_statistics():
             "average_confidence": None
         }
 
+
 def _nm_background_worker():
 
     while True:
@@ -1673,10 +1698,12 @@ def _nm_background_worker():
             )
             time.sleep(20)
 
+
 threading.Thread(
     target=_nm_background_worker,
     daemon=True
 ).start()
+
 
 # ============================================================
 # NEWS MACHINE ROUTES
@@ -1708,11 +1735,13 @@ def api_news_analysis():
             "server_time": now_utc_iso()
         })
 
+
 @app.route("/api/news-analysis/statistics")
 def api_news_analysis_statistics():
     return jsonify(
         _nm_statistics()
     )
+
 
 # ============================================================
 # ===================== EXISTING ROUTES ======================
