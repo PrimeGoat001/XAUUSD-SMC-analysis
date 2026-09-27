@@ -14,9 +14,7 @@ app = Flask(__name__)
 SYMBOL = "GC=F"
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/" + SYMBOL
 
-# 🔧 CALIBRATION OFFSET: Adjust this value (+ or -) to bridge the 
-# gap between Yahoo Futures (GC=F) and your Broker's Spot Price (XAUUSD)
-PRICE_OFFSET = 0.00  # e.g., if futures is 4311 and spot is 4268, set this to -43.00
+PRICE_OFFSET = 0.00
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -30,7 +28,7 @@ VALID_TFS = set(RANGE_MAP.keys())
 
 _cache = {}
 _cache_lock = threading.Lock()
-CACHE_TTL = 15  # Cache expiration in seconds
+CACHE_TTL = 2 # CHANGED: 15 -> 2 for live forming
 
 def safe_float(value, default=0.0):
     try:
@@ -53,7 +51,6 @@ def normalize_tf(tf):
     }
     tf = aliases.get(tf, tf)
     return tf if tf in VALID_TFS else "15m"
-
 
 # ============================================================
 # DATA ENGINE (YAHOO FINANCE FETCH + OFFSET APPLICATION)
@@ -81,7 +78,7 @@ def get_gold(interval="15m"):
         response = SESSION.get(YAHOO_URL, params=params, timeout=10)
         response.raise_for_status()
         payload = response.json()
-        
+
         chart = payload.get("chart", {})
         results = chart.get("result")
         if not results:
@@ -104,8 +101,7 @@ def get_gold(interval="15m"):
             o, h, l, c = opens[i], highs[i], lows[i], closes[i]
             if o is None or h is None or l is None or c is None:
                 continue
-            
-            # Apply the offset to shift futures data down/up to match spot pricing
+
             candles.append({
                 "time": int(timestamps[i]),
                 "open": round(float(o) + PRICE_OFFSET, 2),
@@ -116,7 +112,7 @@ def get_gold(interval="15m"):
             })
 
         result_candles = candles[-250:]
-        
+
         with _cache_lock:
             _cache[interval] = (result_candles, time.time())
 
@@ -125,39 +121,70 @@ def get_gold(interval="15m"):
         print(f"[DATA ERROR] {interval}: {exc}")
         return []
 
+# ============================================================
+# LIVE PRICE ENGINE - Makes chart move like OANDA (NEW)
+# ============================================================
+_last_live_price = 0
+_last_live_fetch = 0
+
+def get_oanda_live():
+    global _last_live_price, _last_live_fetch
+    # Avoid spamming live API, cache 1 sec
+    if time.time() - _last_live_fetch < 1 and _last_live_price:
+        return _last_live_price
+    try:
+        # Free live gold spot - moves tick by tick
+        r = SESSION.get("https://api.gold-api.com/price/XAU", timeout=4)
+        if r.status_code == 200:
+            j = r.json()
+            p = float(j.get('price', 0))
+            if p > 1000:
+                _last_live_price = p
+                _last_live_fetch = time.time()
+                return _last_live_price
+    except Exception as e:
+        print(f"[LIVE ERROR] {e}")
+    return _last_live_price
+
+def get_gold_with_live(interval="15m"):
+    candles = get_gold(interval)
+    if not candles:
+        return candles
+    live = get_oanda_live()
+    if live and live > 100:
+        live_cal = live + PRICE_OFFSET
+        last = candles[-1]
+        # REAL CANDLE FORMING: update close/high/low live
+        last["close"] = round(live_cal, 2)
+        last["high"] = round(max(last["high"], live_cal), 2)
+        last["low"] = round(min(last["low"], live_cal), 2)
+    return candles
 
 # ============================================================
-# TECHNICAL INDICATORS
+# TECHNICAL INDICATORS (UNCHANGED)
 # ============================================================
 
 def calculate_rsi(closes, period=14):
     if len(closes) <= period:
         return 50.0
-
     gains, losses = [], []
     for i in range(1, len(closes)):
         change = closes[i] - closes[i - 1]
         gains.append(max(change, 0))
         losses.append(max(-change, 0))
-
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
-
     for i in range(period, len(gains)):
         avg_gain = ((avg_gain * (period - 1)) + gains[i]) / period
         avg_loss = ((avg_loss * (period - 1)) + losses[i]) / period
-
     if avg_loss == 0:
         return 100.0
-
     rs = avg_gain / avg_loss
     return round(100 - (100 / (1 + rs)), 2)
-
 
 def calculate_atr(candles, period=14):
     if len(candles) < period + 1:
         return 0.0
-
     true_ranges = []
     for i in range(1, len(candles)):
         c, p = candles[i], candles[i - 1]
@@ -167,13 +194,7 @@ def calculate_atr(candles, period=14):
             abs(c["low"] - p["close"])
         )
         true_ranges.append(tr)
-
     return round(sum(true_ranges[-period:]) / period, 4) if true_ranges else 0.0
-
-
-# ============================================================
-# SWING DETECTION & MTF BIAS
-# ============================================================
 
 def find_swing_highs(candles, left=2, right=2):
     result = []
@@ -185,7 +206,6 @@ def find_swing_highs(candles, left=2, right=2):
             result.append(i)
     return result
 
-
 def find_swing_lows(candles, left=2, right=2):
     result = []
     for i in range(left, len(candles) - right):
@@ -196,24 +216,19 @@ def find_swing_lows(candles, left=2, right=2):
             result.append(i)
     return result
 
-
 def get_single_tf_bias(tf):
     candles = get_gold(tf)
     if len(candles) < 30:
         return "NEUTRAL"
-
     swing_highs = find_swing_highs(candles, 2, 2)
     swing_lows = find_swing_lows(candles, 2, 2)
-
     if len(swing_highs) < 2 or len(swing_lows) < 2:
         return "NEUTRAL"
-
     last_high = candles[swing_highs[-1]]["high"]
     previous_high = candles[swing_highs[-2]]["high"]
     last_low = candles[swing_lows[-1]]["low"]
     previous_low = candles[swing_lows[-2]]["low"]
     price = candles[-1]["close"]
-
     if last_high > previous_high and last_low > previous_low and price >= last_low:
         return "BULLISH"
     if last_high < previous_high and last_low < previous_low and price <= last_high:
@@ -224,7 +239,6 @@ def get_single_tf_bias(tf):
         return "BEARISH"
     return "NEUTRAL"
 
-
 def build_mtf_matrix():
     return {
         "1m": get_single_tf_bias("1m"),
@@ -234,48 +248,34 @@ def build_mtf_matrix():
         "1d": get_single_tf_bias("1d"),
     }
 
-
-# ============================================================
-# STRUCTURE & LIQUIDITY ENGINES
-# ============================================================
-
 def detect_structure(candles):
     if len(candles) < 20:
         return {"state": "NEUTRAL", "event": None, "level": None, "index": None}
-
     swing_highs = find_swing_highs(candles, 2, 2)
     swing_lows = find_swing_lows(candles, 2, 2)
-
     if not swing_highs or not swing_lows:
         return {"state": "NEUTRAL", "event": None, "level": None, "index": None}
-
     last_high_idx = swing_highs[-1]
     last_low_idx = swing_lows[-1]
     last_high = candles[last_high_idx]["high"]
     last_low = candles[last_low_idx]["low"]
-
     previous_state = "NEUTRAL"
     if len(swing_highs) >= 2 and len(swing_lows) >= 2:
         h1 = candles[swing_highs[-2]]["high"]
         h2 = candles[swing_highs[-1]]["high"]
         l1 = candles[swing_lows[-2]]["low"]
         l2 = candles[swing_lows[-1]]["low"]
-
         if h2 > h1 and l2 > l1:
             previous_state = "BULLISH"
         elif h2 < h1 and l2 < l1:
             previous_state = "BEARISH"
-
     close = candles[-1]["close"]
-
     if close > last_high:
         event = "CHoCH" if previous_state == "BEARISH" else "BOS"
         return {"state": "BULLISH", "event": event, "level": last_high, "index": last_high_idx}
-
     if close < last_low:
         event = "CHoCH" if previous_state == "BULLISH" else "BOS"
         return {"state": "BEARISH", "event": event, "level": last_low, "index": last_low_idx}
-
     return {
         "state": previous_state,
         "event": None,
@@ -283,18 +283,14 @@ def detect_structure(candles):
         "index": last_high_idx if previous_state == "BULLISH" else last_low_idx if previous_state == "BEARISH" else None,
     }
 
-
 def detect_liquidity(candles, tolerance_factor=0.12):
     if len(candles) < 30:
         return [], []
-
     atr = calculate_atr(candles) or 1.0
     tolerance = atr * tolerance_factor
     swing_highs = find_swing_highs(candles, 2, 2)
     swing_lows = find_swing_lows(candles, 2, 2)
-
     lines, events = [], []
-
     if len(swing_highs) >= 2:
         a, b = swing_highs[-1], swing_highs[-2]
         p1, p2 = candles[a]["high"], candles[b]["high"]
@@ -305,7 +301,6 @@ def detect_liquidity(candles, tolerance_factor=0.12):
                 lines.append({"price": level, "color": "#00e5ff", "title": "EQUAL HIGH", "lineStyle": 2, "layer": "liquidity", "active": True})
             else:
                 events.append({"type": "BUY_SIDE_SWEEP", "price": level, "time": candles[-1]["time"], "label": "BUY-SIDE SWEEP"})
-
     if len(swing_lows) >= 2:
         a, b = swing_lows[-1], swing_lows[-2]
         p1, p2 = candles[a]["low"], candles[b]["low"]
@@ -316,13 +311,7 @@ def detect_liquidity(candles, tolerance_factor=0.12):
                 lines.append({"price": level, "color": "#00e5ff", "title": "EQUAL LOW", "lineStyle": 2, "layer": "liquidity", "active": True})
             else:
                 events.append({"type": "SELL_SIDE_SWEEP", "price": level, "time": candles[-1]["time"], "label": "SELL-SIDE SWEEP"})
-
     return lines, events
-
-
-# ============================================================
-# ZONES & ANALYSIS
-# ============================================================
 
 def is_zone_violated(zone, candles, created_index):
     if not candles:
@@ -330,12 +319,10 @@ def is_zone_violated(zone, candles, created_index):
     top = safe_float(zone.get("top"), None)
     bottom = safe_float(zone.get("bottom"), None)
     direction = str(zone.get("direction", "")).lower()
-
     if top is None or bottom is None:
         return True
     if created_index is None or created_index < 0:
         created_index = 0
-
     for j in range(created_index + 1, len(candles)):
         close = safe_float(candles[j].get("close"), None)
         if close is None:
@@ -346,20 +333,16 @@ def is_zone_violated(zone, candles, created_index):
             return True
     return False
 
-
 def detect_fvgs(candles, max_zones=6):
     active_zones = []
     if len(candles) < 5:
         return active_zones
-
     atr = calculate_atr(candles) or 1.0
     minimum_gap = atr * 0.10
     start = max(2, len(candles) - 80)
     candidates = []
-
     for i in range(start, len(candles)):
         left, middle, right = candles[i - 2], candles[i - 1], candles[i]
-
         if right["low"] > left["high"]:
             gap = right["low"] - left["high"]
             if gap >= minimum_gap:
@@ -378,35 +361,28 @@ def detect_fvgs(candles, max_zones=6):
                     "timeStart": left["time"], "createdTime": right["time"], "createdIndex": i,
                     "color": "rgba(255,68,68,0.16)", "borderColor": "#ff4444", "layer": "fvg", "status": "active", "valid": True
                 })
-
     for zone in candidates:
         if is_zone_violated(zone, candles, zone["createdIndex"]):
             continue
         zone.pop("createdIndex", None)
         active_zones.append(zone)
-
     return active_zones[-max_zones:]
-
 
 def detect_order_blocks(candles, max_zones=6):
     active_zones = []
     if len(candles) < 10:
         return active_zones
-
     atr = calculate_atr(candles) or 1.0
     avg_body = sum(abs(c["close"] - c["open"]) for c in candles[-20:]) / min(20, len(candles))
     start = max(2, len(candles) - 80)
     candidates = []
-
     for i in range(start, len(candles) - 2):
         current = candles[i]
         next_candle = candles[i + 1]
         next_body = abs(next_candle["close"] - next_candle["open"])
-
         displacement = next_body > avg_body * 1.25 and next_body > atr * 0.35
         if not displacement:
             continue
-
         if current["close"] < current["open"] and next_candle["close"] > current["high"]:
             candidates.append({
                 "type": "Bullish Order Block", "label": "BULLISH OB", "direction": "bullish",
@@ -421,15 +397,12 @@ def detect_order_blocks(candles, max_zones=6):
                 "timeStart": current["time"], "createdTime": next_candle["time"], "createdIndex": i + 1,
                 "color": "rgba(239,68,68,0.18)", "borderColor": "#ef4444", "layer": "ob", "status": "active", "valid": True
             })
-
     for zone in candidates:
         if is_zone_violated(zone, candles, zone["createdIndex"]):
             continue
         zone.pop("createdIndex", None)
         active_zones.append(zone)
-
     return active_zones[-max_zones:]
-
 
 def calculate_pd(candles):
     lookback = min(80, len(candles))
@@ -446,30 +419,25 @@ def calculate_pd(candles):
         "current_zone": zone,
     }
 
-
 def build_signal(candles, interval, mtf, structure, liquidity_events, fvg_zones, ob_zones, pd):
     price = candles[-1]["close"]
     rsi = calculate_rsi([c["close"] for c in candles])
     score = 0
     reasons = []
-
     bullish_count = sum(1 for value in mtf.values() if value == "BULLISH")
     bearish_count = sum(1 for value in mtf.values() if value == "BEARISH")
-
     if bullish_count >= 3:
         score += 2
         reasons.append(f"MTF alignment: {bullish_count}/5 bullish")
     elif bearish_count >= 3:
         score -= 2
         reasons.append(f"MTF alignment: {bearish_count}/5 bearish")
-
     if structure["state"] == "BULLISH":
         score += 2
         reasons.append(f"Bullish {structure['event']}" if structure["event"] else "Bullish market structure")
     elif structure["state"] == "BEARISH":
         score -= 2
         reasons.append(f"Bearish {structure['event']}" if structure["event"] else "Bearish market structure")
-
     for event in liquidity_events:
         if event["type"] == "SELL_SIDE_SWEEP":
             score += 2
@@ -477,7 +445,6 @@ def build_signal(candles, interval, mtf, structure, liquidity_events, fvg_zones,
         elif event["type"] == "BUY_SIDE_SWEEP":
             score -= 2
             reasons.append("Buy-side liquidity swept")
-
     if score >= 6:
         signal = "STRONG BUY"
     elif score >= 3:
@@ -488,11 +455,9 @@ def build_signal(candles, interval, mtf, structure, liquidity_events, fvg_zones,
         signal = "SELL"
     else:
         signal = "WAIT"
-
     atr = calculate_atr(candles) or max(price * 0.001, 0.10)
     entry = round(price, 2)
     sl_distance = atr * 1.5
-
     if signal in ("BUY", "STRONG BUY"):
         stop_loss = round(entry - sl_distance, 2)
         risk = entry - stop_loss
@@ -503,20 +468,16 @@ def build_signal(candles, interval, mtf, structure, liquidity_events, fvg_zones,
         tp1, tp2, tp3 = round(entry - risk, 2), round(entry - risk * 2, 2), round(entry - risk * 3, 2)
     else:
         stop_loss, tp1, tp2, tp3 = None, None, None, None
-
     confidence = round(clamp(50 + abs(score) * 5, 50, 95))
-
     return {
         "signal": signal, "score": score, "confidence": confidence, "rsi": rsi,
         "entry": entry, "stopLoss": stop_loss, "takeProfit1": tp1, "takeProfit2": tp2, "takeProfit3": tp3,
         "reasons": reasons, "bullish_mtf": bullish_count, "bearish_mtf": bearish_count, "atr": round(atr, 4),
     }
 
-
 def smc_analysis(interval="15m"):
     interval = normalize_tf(interval)
-    candles = get_gold(interval)
-
+    candles = get_gold_with_live(interval) # CHANGED: use live
     if len(candles) < 40:
         return {
             "status": "INSUFFICIENT_DATA", "symbol": SYMBOL, "timeframe": interval,
@@ -524,7 +485,6 @@ def smc_analysis(interval="15m"):
             "candles": [], "markers": [], "lines": [], "zones": [],
             "reasons": ["Insufficient candle history fetched."], "mtf_matrix": {}, "pd_zones": {},
         }
-
     price = candles[-1]["close"]
     mtf = build_mtf_matrix()
     structure = detect_structure(candles)
@@ -533,7 +493,6 @@ def smc_analysis(interval="15m"):
     ob_zones = detect_order_blocks(candles)
     pd = calculate_pd(candles)
     signal_data = build_signal(candles, interval, mtf, structure, liquidity_events, fvg_zones, ob_zones, pd)
-
     lines = []
     if structure["level"] is not None:
         lines.append({
@@ -542,11 +501,9 @@ def smc_analysis(interval="15m"):
             "title": structure["event"] or "STRUCTURE",
             "lineStyle": 0, "layer": "bos_choch",
         })
-
     lines.extend(liquidity_lines)
     lines.append({"price": pd["swing_low"], "color": "#22c55e", "title": "DEMAND", "lineStyle": 1, "layer": "structure"})
     lines.append({"price": pd["swing_high"], "color": "#ef4444", "title": "SUPPLY", "lineStyle": 1, "layer": "structure"})
-
     markers = []
     if structure["event"]:
         markers.append({
@@ -557,9 +514,7 @@ def smc_analysis(interval="15m"):
             "text": f"{structure['event']} ↑" if structure["state"] == "BULLISH" else f"{structure['event']} ↓",
             "layer": "bos_choch",
         })
-
     zones = fvg_zones + ob_zones
-
     return {
         "status": "OK", "symbol": SYMBOL, "timeframe": interval, "price": price,
         "signal": signal_data["signal"], "score": signal_data["score"], "confidence": signal_data["confidence"],
@@ -574,7 +529,6 @@ def smc_analysis(interval="15m"):
         "reasons": signal_data["reasons"], "liquidity": liquidity_events, "generated_at": now_utc_iso(),
     }
 
-
 @app.route("/api")
 def api_full():
     tf = normalize_tf(request.args.get("tf", "15m"))
@@ -583,33 +537,29 @@ def api_full():
     except Exception as exc:
         return jsonify({"status": "ERROR", "reasons": [str(exc)]}), 500
 
-
 @app.route("/api/tick")
 def api_tick():
     tf = normalize_tf(request.args.get("tf", "15m"))
-    candles = get_gold(tf)
+    candles = get_gold_with_live(tf) # CHANGED: use live
     if not candles:
         return jsonify({})
     return jsonify(candles[-1])
-
 
 @app.route("/api/health")
 def api_health():
     return jsonify({
         "status": "online",
-        "engine": "GoldSMC Pro Pydroid Edition",
+        "engine": "GoldSMC Pro Pydroid Edition + Live Forming",
         "symbol": SYMBOL,
         "server_time": now_utc_iso(),
     })
-
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
-
 if __name__ == "__main__":
     print("=" * 60)
-    print(" GOLD SMC PRO TERMINAL - PYDROID EDITION")
+    print(" GOLD SMC PRO TERMINAL - LIVE FORMING EDITION")
     print("=" * 60)
     app.run(host="0.0.0.0", port=5000, debug=True)
