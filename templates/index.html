@@ -33,6 +33,18 @@
       width: 100vw!important;
       height: 100vh!important;
       background: #0b0b10!important;
+      display: flex!important;
+      flex-direction: column!important;
+    }
+    #chartContainerBlock:fullscreen .relative.w-full,
+    #chartContainerBlock:-webkit-full-screen .relative.w-full {
+      height: 100% !important;
+      flex: 1 !important;
+    }
+    #chartContainerBlock:fullscreen #chart,
+    #chartContainerBlock:-webkit-full-screen #chart {
+      height: 100% !important;
+      width: 100% !important;
     }
   </style>
 </head>
@@ -293,10 +305,12 @@ function processChartData(d){
   `;
   const container=document.getElementById('chart');
   if(!chart){
-    chart=LightweightCharts.createChart(container,{width:container.clientWidth,height:container.clientHeight,layout:{background:{color:'#111119'},textColor:'#888'},grid:{vertLines:{color:'#1a1a23'},horzLines:{color:'#1a1a23'}},timeScale:{timeVisible:true,secondsVisible:false},crosshair:{mode:LightweightCharts.CrosshairMode.Normal}});
+    chart=LightweightCharts.createChart(container,{width:container.clientWidth||container.parentElement.clientWidth||300,height:container.clientHeight||400,layout:{background:{color:'#111119'},textColor:'#888'},grid:{vertLines:{color:'#1a1a23'},horzLines:{color:'#1a1a23'}},timeScale:{timeVisible:true,secondsVisible:false},crosshair:{mode:LightweightCharts.CrosshairMode.Normal}});
     candleSeries=chart.addCandlestickSeries({upColor:'#00ff88',downColor:'#ff4444',borderVisible:false,wickUpColor:'#00ff88',wickDownColor:'#ff4444'});
     chart.timeScale().subscribeVisibleLogicalRangeChange(()=>{requestAnimationFrame(renderSMCZonesCanvas);});
     window.addEventListener('resize',()=>{if(chart&&container){chart.applyOptions({width:container.clientWidth,height:container.clientHeight});requestAnimationFrame(renderSMCZonesCanvas);}});
+    setTimeout(()=>{ if(chart){ chart.applyOptions({width:container.clientWidth,height:container.clientHeight}); chart.timeScale().fitContent(); requestAnimationFrame(renderSMCZonesCanvas); } },100);
+    setTimeout(()=>{ if(chart){ chart.applyOptions({width:container.clientWidth,height:container.clientHeight}); chart.timeScale().fitContent(); } },500);
   }
   if(candleSeries&&d.candles&&d.candles.length>0){candleSeries.setData(d.candles);if(isInitialLoad){chart.timeScale().fitContent();isInitialLoad=false;}drawSMCStructure(d);}
 }
