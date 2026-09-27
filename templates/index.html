@@ -11,8 +11,8 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <style>
     body { background-color: #0b0b10; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow-x: hidden; }
-    .no-scrollbar::-webkit-scrollbar { display: none; }
-    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+   .no-scrollbar::-webkit-scrollbar { display: none; }
+   .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
     * { box-sizing: border-box; }
   </style>
 </head>
@@ -20,7 +20,7 @@
 
   <!-- TOP WRAPPER: SESSIONS, NEWS BANNER, AND HEADER -->
   <div class="bg-[#111119] border border-white/10 rounded-t-2xl mt-2 overflow-hidden">
-    
+
     <!-- TOP BAR: TRADING SESSIONS & MARKET STATUS -->
     <div class="px-3 py-2 flex flex-wrap items-center justify-between text-xs font-mono gap-2 border-b border-white/10">
       <div class="flex items-center gap-3 overflow-x-auto no-scrollbar py-1">
@@ -131,7 +131,7 @@
   <!-- FOOTER -->
   <footer class="mt-6 bg-[#111119] border border-white/5 rounded-[24px] p-4 md:p-5 text-xs text-white/60 space-y-4">
     <div class="bg-red-500/10 border border-red-500/20 rounded-xl p-3 text-[11px] text-red-300 leading-relaxed">
-      <span class="font-bold uppercase tracking-wide text-red-400"><i class="fa-solid fa-triangle-exclamation mr-1"></i> Financial Risk Warning:</span> 
+      <span class="font-bold uppercase tracking-wide text-red-400"><i class="fa-solid fa-triangle-exclamation mr-1"></i> Financial Risk Warning:</span>
       Trading foreign exchange, CFDs, and precious metals like Gold (XAU/USD) carries high risk and may not be suitable for all investors. Past performance does not guarantee future results.
     </div>
 
@@ -197,7 +197,7 @@
     let activePriceLines = [];
     let isInitialLoad = true;
     let cachedNewsEvents = [];
-    
+
     // Performance Cache & Abort Controllers
     let tfDataCache = {};
     let currentFetchController = null;
@@ -231,7 +231,7 @@
         let hours = Math.floor((diffSecs % 86400) / 3600);
         let mins = Math.floor((diffSecs % 3600) / 60);
         let secs = diffSecs % 60;
-        clockEl.innerHTML = `<span class="text-red-400"><i class="fa-solid fa-lock mr-1"></i> Market Closed (Opens in ${days > 0 ? days + 'd ' : ''}${hours}h ${mins}m ${secs}s)</span>`;
+        clockEl.innerHTML = `<span class="text-red-400"><i class="fa-solid fa-lock mr-1"></i> Market Closed (Opens in ${days > 0? days + 'd ' : ''}${hours}h ${mins}m ${secs}s)</span>`;
       } else {
         clockEl.innerText = now.toISOString().substring(11, 19) + " UTC";
       }
@@ -244,9 +244,9 @@
       ];
 
       const html = sessions.map(s => {
-        let isOpen = !isWeekendClosed && (s.open < s.close ? (utcHour >= s.open && utcHour < s.close) : (utcHour >= s.open || utcHour < s.close));
-        let statusBadge = isOpen ? 
-          '<span class="bg-green-500/20 text-green-400 border border-green-500/30 px-1.5 py-0.5 rounded font-bold">OPEN</span>' : 
+        let isOpen =!isWeekendClosed && (s.open < s.close? (utcHour >= s.open && utcHour < s.close) : (utcHour >= s.open || utcHour < s.close));
+        let statusBadge = isOpen?
+          '<span class="bg-green-500/20 text-green-400 border border-green-500/30 px-1.5 py-0.5 rounded font-bold">OPEN</span>' :
           '<span class="bg-white/5 text-white/40 border border-white/10 px-1.5 py-0.5 rounded">CLOSED</span>';
         return `<span class="flex items-center gap-1 whitespace-nowrap">${s.name}: ${statusBadge}</span>`;
       }).join('<span class="text-white/20">•</span>');
@@ -285,7 +285,7 @@
       updateMarketSessionsAndClock();
       checkUpcomingNewsAlert();
 
-      let tfMinutes = currentTF === '1m' ? 1 : currentTF === '5m' ? 5 : currentTF === '15m' ? 15 : currentTF === '1h' ? 60 : 1440;
+      let tfMinutes = currentTF === '1m'? 1 : currentTF === '5m'? 5 : currentTF === '15m'? 15 : currentTF === '1h'? 60 : 1440;
       let secondsLeft = (tfMinutes * 60) - ((now.getMinutes() % tfMinutes) * 60 + now.getSeconds());
       let m = Math.floor(secondsLeft / 60);
       let s = secondsLeft % 60;
@@ -293,12 +293,12 @@
     }, 1000);
 
     function toggleNewsModal(open) {
-      document.getElementById('newsModal').classList.toggle('hidden', !open);
+      document.getElementById('newsModal').classList.toggle('hidden',!open);
       if (open) loadNewsEvents();
     }
 
     function changeTimeframe(tf, btnElement) {
-      if (currentTF === tf && !isInitialLoad) return;
+      if (currentTF === tf &&!isInitialLoad) return;
       currentTF = tf;
       isInitialLoad = true;
 
@@ -318,14 +318,14 @@
       let loadingOverlay = document.getElementById('chartLoadingOverlay');
       loadingOverlay.classList.remove('opacity-0', 'pointer-events-none');
       loadingOverlay.classList.add('opacity-100');
-      
+
       // 3. Load from memory cache if available for instant display (0ms), otherwise fetch server network history
       if (tfDataCache[tf]) {
         setTimeout(() => {
           processChartData(tfDataCache[tf]);
           loadingOverlay.classList.remove('opacity-100');
           loadingOverlay.classList.add('opacity-0', 'pointer-events-none');
-        }, 20); // Minor microtask pause to let browser paint the loader frame
+        }, 20);
       } else {
         loadChartHistory();
       }
@@ -359,7 +359,7 @@
               </div>
               <div class="text-[10px] text-white/50">${e.country} • High Impact Economic Release</div>
             </div>
-            <div class="text-xs font-mono text-white/80">${e.date ? e.date.substring(11, 16) : 'Today'} UTC</div>
+            <div class="text-xs font-mono text-white/80">${e.date? e.date.substring(11, 16) : 'Today'} UTC</div>
           </div>
         `).join('');
       } catch (e) {
@@ -376,12 +376,12 @@
       try {
         let r = await fetch(`/api?tf=${currentTF}`, { signal: currentFetchController.signal });
         let d = await r.json();
-        
+
         // Cache data payload locally
         tfDataCache[currentTF] = d;
         processChartData(d);
       } catch (e) {
-        if (e.name !== 'AbortError') {
+        if (e.name!== 'AbortError') {
           console.error("Chart Load Error:", e);
         }
       } finally {
@@ -393,28 +393,28 @@
 
     function processChartData(d) {
       currentData = d;
-      let color = d.score > 0 ? 'text-green-400' : d.score < 0 ? 'text-red-400' : 'text-yellow-400';
-      
+      let color = d.score > 0? 'text-green-400' : d.score < 0? 'text-red-400' : 'text-yellow-400';
+
       if (d.mtf_matrix) {
         let matrixHTML = Object.entries(d.mtf_matrix).map(([tf, bias]) => {
-          let badgeBg = bias === 'BULLISH' ? 'bg-green-500/20 text-green-400 border-green-500/30' : bias === 'BEARISH' ? 'bg-red-500/20 text-red-400 border-red-500/30' : 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30';
+          let badgeBg = bias === 'BULLISH'? 'bg-green-500/20 text-green-400 border-green-500/30' : bias === 'BEARISH'? 'bg-red-500/20 text-red-400 border-red-500/30' : 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30';
           return `<span class="px-2 py-0.5 rounded-full border ${badgeBg} font-bold whitespace-nowrap">${tf.toUpperCase()}: ${bias}</span>`;
         }).join('');
         document.getElementById('mtfMatrixContainer').innerHTML = matrixHTML;
       }
 
-      let pdZoneBadge = d.pd_zones && d.pd_zones.current_zone === 'DISCOUNT' ? 
-        '<span class="text-green-400 font-bold">DISCOUNT (Buying Zone)</span>' : 
+      let pdZoneBadge = d.pd_zones && d.pd_zones.current_zone === 'DISCOUNT'?
+        '<span class="text-green-400 font-bold">DISCOUNT (Buying Zone)</span>' :
         '<span class="text-red-400 font-bold">PREMIUM (Selling Zone)</span>';
 
       document.getElementById('info').innerHTML = `
         <div class="flex justify-between items-start">
           <div class="text-[10px] text-white/40 uppercase tracking-widest font-mono">Signal (${currentTF.toUpperCase()})</div>
-          <div class="text-[10px] bg-white/10 px-2.5 py-1 rounded-full font-mono">RSI ${d.rsi ? d.rsi.toFixed(1) : '50.0'}</div>
+          <div class="text-[10px] bg-white/10 px-2.5 py-1 rounded-full font-mono">RSI ${d.rsi? d.rsi.toFixed(1) : '50.0'}</div>
         </div>
         <div class="mt-2 text-2xl font-black ${color} leading-tight">${d.signal}</div>
-        <div class="mt-1 text-xs font-mono text-white/60">$${d.price ? d.price.toFixed(2) : '0.00'}</div>
-        
+        <div class="mt-1 text-xs font-mono text-white/60">$${d.price? d.price.toFixed(2) : '0.00'}</div>
+
         <div class="mt-3 bg-white/5 border border-white/10 rounded-xl p-2.5 flex justify-between items-center text-xs">
           <span class="text-white/50 font-mono">P/D Zone:</span>
           ${pdZoneBadge}
@@ -428,11 +428,11 @@
         <div class="mt-3 grid grid-cols-2 gap-2">
           <div class="bg-green-500/10 border border-green-500/20 rounded-xl p-2.5">
             <div class="text-[9px] text-green-300 uppercase font-bold">Demand Zone</div>
-            <div class="text-xs font-bold text-green-400">$${d.demand ? d.demand.toFixed(2) : '0.00'}</div>
+            <div class="text-xs font-bold text-green-400">$${d.demand? d.demand.toFixed(2) : '0.00'}</div>
           </div>
           <div class="bg-red-500/10 border border-red-500/20 rounded-xl p-2.5">
             <div class="text-[9px] text-red-300 uppercase font-bold">Supply Zone</div>
-            <div class="text-xs font-bold text-red-400">$${d.supply ? d.supply.toFixed(2) : '0.00'}</div>
+            <div class="text-xs font-bold text-red-400">$${d.supply? d.supply.toFixed(2) : '0.00'}</div>
           </div>
         </div>
 
@@ -491,7 +491,7 @@
 
       if (data.lines) {
         data.lines.forEach(l => {
-          if ((l.layer === 'bos_choch' && !showBOS) || (l.layer === 'liquidity' && !showLiq)) return;
+          if ((l.layer === 'bos_choch' &&!showBOS) || (l.layer === 'liquidity' &&!showLiq)) return;
           let pl = candleSeries.createPriceLine({
             price: l.price,
             color: l.color,
@@ -506,8 +506,8 @@
 
       if (data.markers) {
         let filteredMarkers = data.markers.filter(m => {
-          if (m.layer === 'bos_choch' && !showBOS) return false;
-          if (m.layer === 'liquidity' && !showLiq) return false;
+          if (m.layer === 'bos_choch' &&!showBOS) return false;
+          if (m.layer === 'liquidity' &&!showLiq) return false;
           return true;
         });
         candleSeries.setMarkers(filteredMarkers);
@@ -519,7 +519,7 @@
     function renderSMCZonesCanvas() {
       if (!currentData) return;
       let canvas = document.getElementById('drawCanvas');
-      if (!canvas || !chart || !candleSeries) return;
+      if (!canvas ||!chart ||!candleSeries) return;
 
       let ctx = canvas.getContext('2d');
       canvas.width = canvas.parentElement.clientWidth;
@@ -537,7 +537,7 @@
         let eqY = candleSeries.priceToCoordinate(pd.equilibrium);
         let lowY = candleSeries.priceToCoordinate(pd.swing_low);
 
-        if (highY !== null && eqY !== null && lowY !== null) {
+        if (highY!== null && eqY!== null && lowY!== null) {
           ctx.fillStyle = "rgba(239, 68, 68, 0.05)";
           ctx.fillRect(0, Math.min(highY, eqY), canvas.width, Math.abs(eqY - highY));
 
@@ -572,14 +572,14 @@
 
       let zones = data.zones || [];
       zones.forEach(zone => {
-        if (zone.layer === 'ob' && !showOB) return;
-        if (zone.layer === 'fvg' && !showFVG) return;
+        if (zone.layer === 'ob' &&!showOB) return;
+        if (zone.layer === 'fvg' &&!showFVG) return;
 
         let topY = candleSeries.priceToCoordinate(zone.top);
         let bottomY = candleSeries.priceToCoordinate(zone.bottom);
         let startX = chart.timeScale().timeToCoordinate(zone.timeStart);
 
-        if (topY !== null && bottomY !== null && startX !== null && !isNaN(topY) && !isNaN(bottomY)) {
+        if (topY!== null && bottomY!== null && startX!== null &&!isNaN(topY) &&!isNaN(bottomY)) {
           let rectHeight = Math.abs(bottomY - topY);
           let rectY = Math.min(topY, bottomY);
           let rectWidth = Math.max(canvas.width - startX, 40);
@@ -599,7 +599,7 @@
     }
 
     async function updateRealtimeTick() {
-      if (!candleSeries || !currentData) return;
+      if (!candleSeries ||!currentData) return;
       try {
         let res = await fetch(`/api/tick?tf=${currentTF}`);
         let candle = await res.json();
@@ -614,7 +614,7 @@
     updateMarketSessionsAndClock();
     loadNewsEvents();
     loadChartHistory();
-    setInterval(updateRealtimeTick, 2000);
+    setInterval(updateRealtimeTick, 1000);
     setInterval(loadChartHistory, 30000);
   </script>
 </body>
