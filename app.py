@@ -7,10 +7,6 @@ from flask import Flask, jsonify, request, render_template
 
 app = Flask(__name__)
 
-# ============================================================
-# GOLD SMC PRO TERMINAL - WITH PRICE OFFSET CALIBRATION
-# ============================================================
-
 SYMBOL = "GC=F"
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/" + SYMBOL
 
@@ -23,12 +19,22 @@ HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
-RANGE_MAP = {"1m": "1d", "5m": "5d", "15m": "5d", "30m": "5d", "45m": "5d", "1h": "1mo", "2h": "1mo", "4h": "3mo", "1d": "1y"}
-VALID_TFS = set(RANGE_MAP.keys())
+# ONLY 6 TFS - 1 SEC REFRESH
+RANGE_MAP = {"1m": "1d", "5m": "5d", "15m": "5d", "30m": "5d", "1h": "1mo", "1d": "1y"}
+VALID_TFS = {"1m", "5m", "15m", "30m", "1h", "1d"}
+
+YAHOO_INTERVAL_MAP = {
+    "1m": "1m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h": "60m",
+    "1d": "1d"
+}
 
 _cache = {}
 _cache_lock = threading.Lock()
-CACHE_TTL = 2
+CACHE_TTL = 1
 
 def safe_float(value, default=0.0):
     try:
@@ -60,18 +66,57 @@ def normalize_tf(tf):
         "5": "5m", "5m": "5m",
         "15": "15m", "15m": "15m",
         "30": "30m", "30m": "30m", "30min": "30m",
-        "45": "45m", "45m": "45m", "45min": "45m",
         "60": "1h", "1h": "1h", "1hr": "1h", "hour": "1h",
-        "2": "2h", "2h": "2h", "2hr": "2h",
-        "4": "4h", "4h": "4h", "4hr": "4h",
         "day": "1d", "daily": "1d", "1d": "1d"
     }
     tf = aliases.get(tf, tf)
     return tf if tf in VALID_TFS else "15m"
 
-# ============================================================
-# DATA ENGINE
-# ============================================================
+def get_yahoo_raw_close():
+    try:
+        params = {"interval": "1m", "range": "1d", "includePrePost": "false"}
+        r = SESSION.get(YAHOO_URL, params=params, timeout=4)
+        r.raise_for_status()
+        payload = r.json()
+        result = payload["chart"]["result"][0]
+        closes = result["indicators"]["quote"][0]["close"]
+        closes = [c for c in closes if c is not None]
+        if closes:
+            return float(closes[-1])
+    except Exception as e:
+        print(f"[RAW YAHOO ERROR] {e}")
+    return None
+
+def get_spot_live():
+    try:
+        r = SESSION.get("https://api.gold-api.com/price/XAU", timeout=2)
+        if r.status_code == 200:
+            j = r.json()
+            p = float(j.get('price', 0))
+            if p > 1000:
+                return p
+    except Exception as e:
+        print(f"[SPOT ERROR] {e}")
+    return None
+
+def auto_sync_loop():
+    global PRICE_OFFSET
+    while True:
+        try:
+            if is_market_open():
+                yahoo_raw = get_yahoo_raw_close()
+                spot = get_spot_live()
+                if yahoo_raw and spot:
+                    new_offset = spot - yahoo_raw
+                    if -70 < new_offset < -5:
+                        PRICE_OFFSET = round(new_offset, 2)
+                        print(f"[1SEC SYNC] JustMarkets: {spot} | offset: {PRICE_OFFSET}")
+            time.sleep(2)
+        except Exception as e:
+            print(f"[AUTO-SYNC ERROR] {e}")
+            time.sleep(2)
+
+threading.Thread(target=auto_sync_loop, daemon=True).start()
 
 def get_gold(interval="15m"):
     interval = normalize_tf(interval)
@@ -82,14 +127,15 @@ def get_gold(interval="15m"):
             if now - timestamp < CACHE_TTL:
                 return cached_candles
     tf_range = RANGE_MAP[interval]
+    yahoo_interval = YAHOO_INTERVAL_MAP.get(interval, interval)
     params = {
-        "interval": interval,
+        "interval": yahoo_interval,
         "range": tf_range,
         "includePrePost": "false",
         "events": "div,splits",
     }
     try:
-        response = SESSION.get(YAHOO_URL, params=params, timeout=10)
+        response = SESSION.get(YAHOO_URL, params=params, timeout=5)
         response.raise_for_status()
         payload = response.json()
         chart = payload.get("chart", {})
@@ -131,10 +177,10 @@ _last_live_fetch = 0
 
 def get_oanda_live():
     global _last_live_price, _last_live_fetch
-    if time.time() - _last_live_fetch < 1 and _last_live_price:
+    if time.time() - _last_live_fetch < 0.8 and _last_live_price:
         return _last_live_price
     try:
-        r = SESSION.get("https://api.gold-api.com/price/XAU", timeout=4)
+        r = SESSION.get("https://api.gold-api.com/price/XAU", timeout=2)
         if r.status_code == 200:
             j = r.json()
             p = float(j.get('price', 0))
@@ -154,16 +200,11 @@ def get_gold_with_live(interval="15m"):
         return candles
     live = get_oanda_live()
     if live and live > 100:
-        live_cal = live + PRICE_OFFSET
         last = candles[-1]
-        last["close"] = round(live_cal, 2)
-        last["high"] = round(max(last["high"], live_cal), 2)
-        last["low"] = round(min(last["low"], live_cal), 2)
+        last["close"] = round(live, 2)
+        last["high"] = round(max(last["high"], live), 2)
+        last["low"] = round(min(last["low"], live), 2)
     return candles
-
-# ============================================================
-# TECHNICAL INDICATORS (UNCHANGED)
-# ============================================================
 
 def calculate_rsi(closes, period=14):
     if len(closes) <= period:
@@ -191,7 +232,7 @@ def calculate_atr(candles, period=14):
         c, p = candles[i], candles[i - 1]
         tr = max(c["high"] - c["low"], abs(c["high"] - p["close"]), abs(c["low"] - p["close"]))
         true_ranges.append(tr)
-    return round(sum(true_ranges[-period:]) / period, 4) if true_ranges else 0.0
+    return round(sum(true_ranges[-period:]) / period, 4) if true_ranges else 0.0)
 
 def find_swing_highs(candles, left=2, right=2):
     result = []
@@ -241,6 +282,7 @@ def build_mtf_matrix():
         "1m": get_single_tf_bias("1m"),
         "5m": get_single_tf_bias("5m"),
         "15m": get_single_tf_bias("15m"),
+        "30m": get_single_tf_bias("30m"),
         "1h": get_single_tf_bias("1h"),
         "1d": get_single_tf_bias("1d"),
     }
@@ -309,7 +351,8 @@ def detect_liquidity(candles, tolerance_factor=0.12):
                 events.append({"type": "SELL_SIDE_SWEEP", "price": level, "time": candles[-1]["time"], "label": "SELL-SIDE SWEEP"})
     return lines, events
 
-def is_zone_violated(zone, candles, created_index):
+# === UPDATED: 3 CANDLE CONFIRMATION ===
+def is_zone_violated(zone, candles, created_index, confirm_bars=3):
     if not candles:
         return False
     top = safe_float(zone.get("top"), None)
@@ -319,14 +362,15 @@ def is_zone_violated(zone, candles, created_index):
         return True
     if created_index is None or created_index < 0:
         created_index = 0
-    for j in range(created_index + 1, len(candles)):
-        close = safe_float(candles[j].get("close"), None)
-        if close is None:
-            continue
-        if direction == "bullish" and close < bottom:
-            return True
-        elif direction == "bearish" and close > top:
-            return True
+    # Need at least confirm_bars after creation
+    if len(candles) - (created_index + 1) < confirm_bars:
+        return False
+    # Last 3 closes must ALL break zone
+    last_closes = [safe_float(candles[j].get("close"), None) for j in range(len(candles)-confirm_bars, len(candles))]
+    if direction == "bullish":
+        return all(c is not None and c < bottom for c in last_closes)
+    elif direction == "bearish":
+        return all(c is not None and c > top for c in last_closes)
     return False
 
 def detect_fvgs(candles, max_zones=6):
@@ -358,7 +402,7 @@ def detect_fvgs(candles, max_zones=6):
                     "color": "rgba(255,68,68,0.16)", "borderColor": "#ff4444", "layer": "fvg", "status": "active", "valid": True
                 })
     for zone in candidates:
-        if is_zone_violated(zone, candles, zone["createdIndex"]):
+        if is_zone_violated(zone, candles, zone["createdIndex"], confirm_bars=3):
             continue
         zone.pop("createdIndex", None)
         active_zones.append(zone)
@@ -394,7 +438,7 @@ def detect_order_blocks(candles, max_zones=6):
                 "color": "rgba(239,68,68,0.18)", "borderColor": "#ef4444", "layer": "ob", "status": "active", "valid": True
             })
     for zone in candidates:
-        if is_zone_violated(zone, candles, zone["createdIndex"]):
+        if is_zone_violated(zone, candles, zone["createdIndex"], confirm_bars=3):
             continue
         zone.pop("createdIndex", None)
         active_zones.append(zone)
@@ -466,24 +510,26 @@ def build_signal(candles, interval, mtf, structure, liquidity_events, fvg_zones,
         "reasons": reasons, "bullish_mtf": bullish_count, "bearish_mtf": bearish_count, "atr": round(atr, 4),
     }
 
+# === UPDATED: STABLE SMC ANALYSIS ===
 def smc_analysis(interval="15m"):
     interval = normalize_tf(interval)
-    candles = get_gold_with_live(interval)
-    if len(candles) < 40:
+    static_candles = get_gold(interval)
+    live_candles = get_gold_with_live(interval)
+    if len(static_candles) < 40:
         return {
             "status": "INSUFFICIENT_DATA", "symbol": SYMBOL, "timeframe": interval,
-            "price": 0, "signal": "WAIT", "score": 0, "confidence": 0, "rsi": 50,
-            "candles": [], "markers": [], "lines": [], "zones": [],
+            "price": live_candles[-1]["close"] if live_candles else 0, "signal": "WAIT", "score": 0, "confidence": 0, "rsi": 50,
+            "candles": live_candles, "markers": [], "lines": [], "zones": [],
             "reasons": ["Insufficient candle history fetched."], "mtf_matrix": {}, "pd_zones": {},
         }
-    price = candles[-1]["close"]
+    price = live_candles[-1]["close"] if live_candles else static_candles[-1]["close"]
     mtf = build_mtf_matrix()
-    structure = detect_structure(candles)
-    liquidity_lines, liquidity_events = detect_liquidity(candles)
-    fvg_zones = detect_fvgs(candles)
-    ob_zones = detect_order_blocks(candles)
-    pd = calculate_pd(candles)
-    signal_data = build_signal(candles, interval, mtf, structure, liquidity_events, fvg_zones, ob_zones, pd)
+    structure = detect_structure(static_candles)
+    liquidity_lines, liquidity_events = detect_liquidity(static_candles)
+    fvg_zones = detect_fvgs(static_candles)
+    ob_zones = detect_order_blocks(static_candles)
+    pd = calculate_pd(static_candles)
+    signal_data = build_signal(live_candles, interval, mtf, structure, liquidity_events, fvg_zones, ob_zones, pd)
     lines = []
     if structure["level"] is not None:
         lines.append({
@@ -498,7 +544,7 @@ def smc_analysis(interval="15m"):
     zones.extend(ob_zones)
     markers = []
     if structure["event"]:
-        markers.append({"time": candles[structure["index"]]["time"] if structure["index"] is not None else candles[-1]["time"], "label": structure["event"]})
+        markers.append({"time": static_candles[structure["index"]]["time"] if structure["index"] is not None else static_candles[-1]["time"], "label": structure["event"]})
     for ev in liquidity_events:
         markers.append({"time": ev["time"], "label": ev["label"]})
     return {
@@ -506,28 +552,22 @@ def smc_analysis(interval="15m"):
         "signal": signal_data["signal"], "score": signal_data["score"], "confidence": signal_data["confidence"],
         "rsi": signal_data["rsi"], "entry": signal_data["entry"], "stopLoss": signal_data["stopLoss"],
         "takeProfit1": signal_data["takeProfit1"], "takeProfit2": signal_data["takeProfit2"], "takeProfit3": signal_data["takeProfit3"],
-        "candles": candles, "markers": markers, "lines": lines, "zones": zones,
+        "candles": static_candles if not live_candles else live_candles, "markers": markers, "lines": lines, "zones": zones,
         "reasons": signal_data["reasons"], "mtf_matrix": mtf, "pd_zones": pd,
         "atr": signal_data["atr"], "bullish_mtf": signal_data["bullish_mtf"], "bearish_mtf": signal_data["bearish_mtf"],
-        "market_open": is_market_open(), "timestamp": now_utc_iso()
+        "market_open": is_market_open(), "timestamp": now_utc_iso(), "offset": PRICE_OFFSET
     }
 
-# ============================================================
-# NEWS API - SAFE VERSION (WON'T RUIN SYSTEM)
-# ============================================================
 _news_cache = {"data": [], "time": 0}
 @app.route("/api/news")
 def api_news():
-    # Return cached or empty instantly - never blocks main system
     now = time.time()
-    if now - _news_cache["time"] < 300: # cache 5 min
+    if now - _news_cache["time"] < 300:
         return jsonify(_news_cache["data"])
     try:
-        # Try fetch but with short timeout, if fails return empty
-        r = SESSION.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", timeout=3)
+        r = SESSION.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", timeout=2)
         if r.status_code == 200:
             data = r.json()
-            # Filter only high impact USD & Gold related
             high = []
             for ev in data[:20]:
                 if ev.get("impact") == "High" and ev.get("country") in ["USD", "US"]:
@@ -560,8 +600,8 @@ def api_price():
     tf = request.args.get("tf", "15m")
     candles = get_gold_with_live(tf)
     if not candles:
-        return jsonify({"price": 0, "market_open": is_market_open()})
-    return jsonify({"price": candles[-1]["close"], "market_open": is_market_open(), "timestamp": now_utc_iso()})
+        return jsonify({"price": 0, "market_open": is_market_open(), "offset": PRICE_OFFSET})
+    return jsonify({"price": candles[-1]["close"], "market_open": is_market_open(), "timestamp": now_utc_iso(), "offset": PRICE_OFFSET})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
