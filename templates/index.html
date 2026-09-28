@@ -723,7 +723,10 @@ let chart,
     isInitialLoad = true,
     cachedNewsEvents = [],
     tfDataCache = {},
-    currentFetchController = null;
+    currentFetchController = null,
+    pendingChartVisibleRange = null,
+    exportCaptureInProgress = false,
+    exportSavedVisibleRange = null;
 
 
 /* ============================================================
@@ -742,6 +745,9 @@ function isGoldMarketClosedNow() {
 
   if (d === 0 && h < 22) return true;
 
+  // Daily XAU/USD market break: Monday-Thursday 21:00-22:00 UTC.
+  if (d >= 1 && d <= 4 && h >= 21 && h < 22) return true;
+
   return false;
 }
 
@@ -758,6 +764,7 @@ function updateMarketSessionsAndClock() {
   const utcHour = now.getUTCHours();
 
   let isWeekend = false;
+  let marketBreak = isGoldMarketClosedNow();
   let target = new Date(now);
 
   if (utcDay === 6) {
@@ -861,6 +868,7 @@ function updateMarketSessionsAndClock() {
 
       let isOpen =
         !isWeekend &&
+        !marketBreak &&
         (
           s.open < s.close
             ? (
@@ -2712,6 +2720,54 @@ function cleanCandleData(candles) {
 
 
 /* ============================================================
+   CHART VIEW RANGE HELPERS
+   ============================================================ */
+
+function getChartVisibleRangeSafe() {
+
+  if (!chart) return null;
+
+  try {
+
+    const range =
+      chart.timeScale().getVisibleRange();
+
+    return range
+      ? {
+          from: range.from,
+          to: range.to
+        }
+      : null;
+
+  }
+
+  catch (e) {
+
+    return null;
+
+  }
+
+}
+
+
+function restoreChartVisibleRangeSafe(range) {
+
+  if (!chart || !range) return;
+
+  try {
+
+    chart
+      .timeScale()
+      .setVisibleRange(range);
+
+  }
+
+  catch (e) {}
+
+}
+
+
+/* ============================================================
    LOAD CANDLES DIRECTLY
    ============================================================ */
 
@@ -2760,6 +2816,10 @@ async function loadCandlesOnly(
 
   }
 
+  const savedVisibleRange =
+    pendingChartVisibleRange ||
+    getChartVisibleRangeSafe();
+
   candleSeries.setData(
     candles
   );
@@ -2771,13 +2831,25 @@ async function loadCandlesOnly(
   currentData.candles =
     candles;
 
-  if (isInitialLoad) {
+  if (savedVisibleRange) {
+
+    requestAnimationFrame(() => {
+
+      restoreChartVisibleRangeSafe(
+        savedVisibleRange
+      );
+
+      renderSMCZonesCanvas();
+
+    });
+
+  }
+
+  else if (isInitialLoad) {
 
     chart
       .timeScale()
       .fitContent();
-
-    isInitialLoad = false;
 
   }
 
@@ -2788,6 +2860,9 @@ async function loadCandlesOnly(
     );
 
   }
+
+  pendingChartVisibleRange = null;
+  isInitialLoad = false;
 
   return candles;
 
@@ -2811,6 +2886,9 @@ function changeTimeframe(
     return;
 
   }
+
+  pendingChartVisibleRange =
+    getChartVisibleRangeSafe();
 
   currentTF = tf;
   isInitialLoad = true;
@@ -2909,7 +2987,7 @@ function changeTimeframe(
   ).innerText =
     `${tf.toUpperCase()} SMC Canvas`;
 
-  loadChartHistory();
+  loadChartHistory(true);
 
 }
 
@@ -2920,84 +2998,130 @@ function changeTimeframe(
 
 function exportChartOnly() {
 
-  let chartBlock =
+  const chartBlock =
     document.getElementById(
       'chartContainerBlock'
     );
 
-  const wasFullscreen =
-    !!document.fullscreenElement;
+  if (!chartBlock) return;
+
+  exportSavedVisibleRange =
+    getChartVisibleRangeSafe();
 
   const capture = () => {
 
-    const width =
-      window.innerWidth;
+    resizeChart();
 
-    const height =
-      window.innerHeight;
+    if (exportSavedVisibleRange) {
 
-    html2canvas(
-      chartBlock,
-      {
-        backgroundColor: '#0b0b10',
-        scale: 2,
-        width: width,
-        height: height,
-        windowWidth: width,
-        windowHeight: height,
-        scrollX: 0,
-        scrollY: 0
-      }
-    )
-      .then(canvas => {
+      restoreChartVisibleRangeSafe(
+        exportSavedVisibleRange
+      );
 
-        let link =
-          document.createElement('a');
+    }
 
-        link.download =
-          `GoldSMC_Chart_${currentTF}_${new Date()
-            .toISOString()
-            .slice(0, 10)}.png`;
+    requestAnimationFrame(() => {
 
-        link.href =
-          canvas.toDataURL(
-            'image/png'
-          );
+      requestAnimationFrame(() => {
 
-        link.click();
+        const width =
+          chartBlock.clientWidth;
+
+        const height =
+          chartBlock.clientHeight;
+
+        html2canvas(
+          chartBlock,
+          {
+            backgroundColor: '#0b0b10',
+            scale: 2,
+            width: width,
+            height: height,
+            windowWidth: width,
+            windowHeight: height,
+            scrollX: 0,
+            scrollY: 0,
+            useCORS: true
+          }
+        )
+          .then(canvas => {
+
+            const link =
+              document.createElement('a');
+
+            link.download =
+              `GoldSMC_Chart_${currentTF}_${new Date()
+                .toISOString()
+                .slice(0, 10)}.png`;
+
+            link.href =
+              canvas.toDataURL(
+                'image/png'
+              );
+
+            link.click();
+
+          })
+          .catch(error => {
+
+            console.error(
+              'Chart image export error:',
+              error
+            );
+
+          })
+          .finally(() => {
+
+            exportCaptureInProgress = false;
+            exportSavedVisibleRange = null;
+
+            if (document.fullscreenElement) {
+
+              document.exitFullscreen();
+
+            }
+
+          });
 
       });
 
+    });
+
   };
 
-  if (!wasFullscreen && chartBlock.requestFullscreen) {
+  exportCaptureInProgress = true;
+
+  if (
+    !document.fullscreenElement &&
+    chartBlock.requestFullscreen
+  ) {
 
     chartBlock
       .requestFullscreen()
       .then(() => {
 
-        setTimeout(() => {
-          capture();
-          setTimeout(() => {
-            if (document.fullscreenElement) {
-              document.exitFullscreen();
-            }
-          }, 100);
-        }, 350);
+        setTimeout(
+          capture,
+          400
+        );
 
       })
       .catch(() => {
+
+        exportCaptureInProgress = false;
         capture();
+
       });
 
   }
 
   else {
+
     capture();
+
   }
 
 }
-
 
 /* ============================================================
    LOAD NEWS EVENTS
@@ -3126,7 +3250,7 @@ async function loadNewsEvents() {
    LOAD CHART HISTORY
    ============================================================ */
 
-async function loadChartHistory() {
+async function loadChartHistory(showLoading = false) {
 
   if (currentFetchController) {
 
@@ -3145,7 +3269,7 @@ async function loadChartHistory() {
       'chartLoadingOverlay'
     );
 
-  if (loadingOverlay) {
+  if (loadingOverlay && showLoading) {
 
     loadingOverlay.classList.remove(
       'opacity-0',
@@ -3282,7 +3406,7 @@ async function loadChartHistory() {
       currentFetchController
     ) {
 
-      if (loadingOverlay) {
+      if (loadingOverlay && showLoading) {
 
         loadingOverlay.classList.remove(
           'opacity-100'
@@ -4717,15 +4841,16 @@ document.addEventListener(
 
       resizeChart();
 
-      if (chart) {
+      if (isFull) {
 
-        chart
-          .timeScale()
-          .fitContent();
-
-        renderSMCZonesCanvas();
+        restoreChartVisibleRangeSafe(
+          exportSavedVisibleRange ||
+          getChartVisibleRangeSafe()
+        );
 
       }
+
+      renderSMCZonesCanvas();
 
     }, 300);
 
@@ -4743,7 +4868,7 @@ updateMarketSessionsAndClock();
 
 loadNewsEvents();
 
-loadChartHistory();
+loadChartHistory(false);
 
 setInterval(
   updateRealtimeTick,
@@ -4751,7 +4876,7 @@ setInterval(
 );
 
 setInterval(
-  loadChartHistory,
+  () => loadChartHistory(false),
   30000
 );
 
