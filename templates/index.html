@@ -2358,8 +2358,11 @@ function initializeChart() {
     document.getElementById('chart');
 
   if (!container) {
+
     console.error('Chart container not found.');
+
     return false;
+
   }
 
   if (
@@ -2576,6 +2579,27 @@ function resizeChart() {
    CLEAN CANDLE DATA
    ============================================================ */
 
+/*
+ * WICK FIX:
+ *
+ * The chart itself already supports candle wicks.
+ * The important part is ensuring that the OHLC values
+ * reaching Lightweight Charts contain a real high/low
+ * range around the body.
+ *
+ * This function:
+ *
+ * 1. Accepts normal OHLC names.
+ * 2. Also accepts o/h/l/c aliases.
+ * 3. Ensures HIGH is never below OPEN/CLOSE.
+ * 4. Ensures LOW is never above OPEN/CLOSE.
+ * 5. Preserves the backend's actual high/low whenever
+ *    they are valid.
+ * 6. Removes invalid candles.
+ * 7. Sorts candles chronologically.
+ * 8. Removes duplicate timestamps.
+ */
+
 function cleanCandleData(candles) {
 
   if (!Array.isArray(candles)) {
@@ -2587,31 +2611,81 @@ function cleanCandleData(candles) {
       .map(c => {
 
         const time =
-          Number(c?.time);
+          Number(
+            c?.time ??
+            c?.timestamp ??
+            c?.t
+          );
 
         const open =
-          Number(c?.open);
+          Number(
+            c?.open ??
+            c?.o
+          );
 
-        const high =
-          Number(c?.high);
+        const rawHigh =
+          Number(
+            c?.high ??
+            c?.h
+          );
 
-        const low =
-          Number(c?.low);
+        const rawLow =
+          Number(
+            c?.low ??
+            c?.l
+          );
 
         const close =
-          Number(c?.close);
+          Number(
+            c?.close ??
+            c?.c
+          );
 
         if (
           !Number.isFinite(time) ||
           !Number.isFinite(open) ||
-          !Number.isFinite(high) ||
-          !Number.isFinite(low) ||
           !Number.isFinite(close)
         ) {
 
           return null;
 
         }
+
+        /*
+         * The supplied high/low are used when valid.
+         *
+         * We then enforce the fundamental OHLC rules:
+         *
+         * HIGH >= OPEN
+         * HIGH >= CLOSE
+         *
+         * LOW <= OPEN
+         * LOW <= CLOSE
+         */
+
+        const high =
+          Number.isFinite(rawHigh)
+            ? Math.max(
+                rawHigh,
+                open,
+                close
+              )
+            : Math.max(
+                open,
+                close
+              );
+
+        const low =
+          Number.isFinite(rawLow)
+            ? Math.min(
+                rawLow,
+                open,
+                close
+              )
+            : Math.min(
+                open,
+                close
+              );
 
         return {
 
@@ -3532,6 +3606,9 @@ function processChartData(d) {
     /*
      * If analysis itself contains valid candles,
      * use them; otherwise keep the candles from /api/candles.
+     *
+     * cleanCandleData() is also applied here so analysis
+     * candles cannot bypass the wick fix.
      */
 
     const analysisCandles =
@@ -4136,13 +4213,15 @@ async function updateRealtimeTick() {
         high:
           Math.max(
             last.high,
-            price
+            price,
+            last.open
           ),
 
         low:
           Math.min(
             last.low,
-            price
+            price,
+            last.open
           ),
 
         close:
