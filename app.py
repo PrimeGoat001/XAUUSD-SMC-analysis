@@ -671,60 +671,20 @@ def get_oanda_live():
 
 
 def get_gold_with_live(interval="5m"):
+    """
+    Return the same Yahoo candle stream used by get_gold().
+
+    The chart must not mix Yahoo historical OHLC with a separate
+    Gold-API spot price inside the latest candle. Doing so can create
+    an artificial vertical candle whenever the two feeds differ.
+
+    The existing PRICE_OFFSET remains applied by get_gold().
+    """
     candles = get_gold(interval)
 
-    if not candles or not is_market_open():
-        return candles
-
-    live_raw = get_oanda_live()
-
-    if live_raw and live_raw > 100:
-
-        last = candles[-1]
-
-        # ====================================================
-        # PRICE_OFFSET FIX
-        # ====================================================
-        #
-        # Yahoo historical candles are offset-adjusted.
-        #
-        # Previously the live Gold-API price was inserted
-        # WITHOUT PRICE_OFFSET.
-        #
-        # That meant the latest candle could suddenly be ~35
-        # dollars away from the historical candles and SMC
-        # analysis would receive inconsistent data.
-        #
-        # The offset is therefore applied to the live value too.
-        #
-        # PRICE_OFFSET itself is NOT changed.
-        # ====================================================
-
-        live = round(
-            live_raw + PRICE_OFFSET,
-            2
-        )
-
-        last["close"] = live
-
-        last["high"] = round(
-            max(
-                last["high"],
-                live
-            ),
-            2
-        )
-
-        last["low"] = round(
-            min(
-                last["low"],
-                live
-            ),
-            2
-        )
-
-    return candles
-
+    # Return independent candle dictionaries so callers such as the
+    # SMC engine cannot mutate the cached Yahoo data.
+    return [dict(candle) for candle in candles]
 
 def calculate_rsi(closes, period=14):
     if len(closes) <= period:
