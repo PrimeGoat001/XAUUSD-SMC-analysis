@@ -1323,7 +1323,8 @@ def is_fvg_filled(
 
 def detect_fvgs(
     candles,
-    max_zones=6
+    max_zones=6,
+    preserve_metadata=False
 ):
     active = []
 
@@ -1423,14 +1424,15 @@ def detect_fvgs(
             zone,
             candles,
             zone["createdIndex"],
-            1
+            3
         ):
             continue
 
-        zone.pop(
-            "createdIndex",
-            None
-        )
+        if not preserve_metadata:
+            zone.pop(
+                "createdIndex",
+                None
+            )
 
         active.append(zone)
 
@@ -1439,6 +1441,7 @@ def detect_fvgs(
 
 def detect_order_blocks(
     candles,
+    fvg_zones=None,
     max_zones=6
 ):
     """
@@ -1449,7 +1452,7 @@ def detect_order_blocks(
       2. The next candle to break the OB candle.
       3. The next candle to create a valid FVG in the same
          direction.
-      4. Immediate violation protection after a confirming close.
+      4. Existing three-close violation protection.
 
     No alternate OB methodology is introduced here.
     """
@@ -1480,71 +1483,18 @@ def detect_order_blocks(
     cands = []
 
     # --------------------------------------------------------
-    # Existing FVG relationship preserved.
+    # FVGs are supplied by the independent FVG engine.
+    # The OB engine may use them for confirmation, but it does
+    # not create, delete, or mutate FVG zones.
     # --------------------------------------------------------
 
-    valid_fvgs = []
-
-    for i in range(
-        start,
-        len(candles)
-    ):
-
-        if i < 2:
-            continue
-
-        left = candles[i - 2]
-        right = candles[i]
-
-        if right["low"] > left["high"]:
-
-            gap = (
-                right["low"] -
-                left["high"]
-            )
-
-            if gap >= atr * 0.10:
-
-                fvg = {
-                    "direction": "bullish",
-                    "createdTime": right["time"],
-                    "createdIndex": i,
-                    "top": right["low"],
-                    "bottom": left["high"]
-                }
-
-                if not is_fvg_filled(
-                    fvg,
-                    candles
-                ):
-                    valid_fvgs.append(
-                        fvg
-                    )
-
-        elif right["high"] < left["low"]:
-
-            gap = (
-                left["low"] -
-                right["high"]
-            )
-
-            if gap >= atr * 0.10:
-
-                fvg = {
-                    "direction": "bearish",
-                    "createdTime": right["time"],
-                    "createdIndex": i,
-                    "top": left["low"],
-                    "bottom": right["high"]
-                }
-
-                if not is_fvg_filled(
-                    fvg,
-                    candles
-                ):
-                    valid_fvgs.append(
-                        fvg
-                    )
+    valid_fvgs = [
+        dict(zone)
+        for zone in (fvg_zones or [])
+        if zone.get("valid") is True
+        and zone.get("status") == "active"
+        and zone.get("createdIndex") is not None
+    ]
 
     for i in range(
         start,
@@ -1560,14 +1510,14 @@ def detect_order_blocks(
                 nxt["open"]
             )
             <=
-            avg_body * 1.05
+            avg_body * 1.25
             or
             abs(
                 nxt["close"] -
                 nxt["open"]
             )
             <=
-            atr * 0.20
+            atr * 0.35
         ):
             continue
 
@@ -1656,7 +1606,7 @@ def detect_order_blocks(
             })
 
     # --------------------------------------------------------
-    # Remove the OB immediately after one confirming violation close.
+    # Preserve the existing three-close protection.
     # --------------------------------------------------------
 
     for zone in cands:
@@ -2815,6 +2765,34 @@ def build_signal(
             "Mixed confirmed chart-pattern signals"
         )
 
+    # --------------------------------------------------------
+    # FVG signal-context validation.
+    # FVGs remain independent from OBs and are used here only
+    # as directional context for the final signal.
+    # --------------------------------------------------------
+
+    bullish_fvg_conflict = any(
+        zone.get("direction") == "bullish"
+        and
+        zone.get("bottom") is not None
+        and
+        zone.get("top") is not None
+        and
+        zone["bottom"] <= price <= zone["top"]
+        for zone in fvg_zones
+    )
+
+    bearish_fvg_conflict = any(
+        zone.get("direction") == "bearish"
+        and
+        zone.get("bottom") is not None
+        and
+        zone.get("top") is not None
+        and
+        zone["bottom"] <= price <= zone["top"]
+        for zone in fvg_zones
+    )
+
     if score >= 6:
         sig = "STRONG BUY"
 
@@ -2829,6 +2807,18 @@ def build_signal(
 
     else:
         sig = "WAIT"
+
+    if sig in {"BUY", "STRONG BUY"} and bearish_fvg_conflict:
+        sig = "WAIT"
+        reasons.append(
+            "Bullish signal blocked by active bearish FVG at current price"
+        )
+
+    elif sig in {"SELL", "STRONG SELL"} and bullish_fvg_conflict:
+        sig = "WAIT"
+        reasons.append(
+            "Bearish signal blocked by active bullish FVG at current price"
+        )
 
     atr = calculate_atr(
         candles
@@ -2970,13 +2960,16 @@ def smc_analysis(interval="5m"):
         smc_candles
     )
 
+    # FVG engine is independent. OBs may use these validated FVGs
+    # as confirmation without owning or mutating their lifecycle.
     fvg_zones = detect_fvgs(
-        smc_candles
+        smc_candles,
+        preserve_metadata=True
     )
 
-    # Existing OB methodology retained.
     ob_zones = detect_order_blocks(
-        smc_candles
+        smc_candles,
+        fvg_zones
     )
 
     pd = calculate_pd(
