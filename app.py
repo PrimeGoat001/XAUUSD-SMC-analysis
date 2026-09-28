@@ -1343,10 +1343,7 @@ def _detect_double_patterns(
 ):
     results = []
 
-    # --------------------------------------------------------
     # DOUBLE TOP
-    # --------------------------------------------------------
-
     if len(highs) >= 2:
 
         h1 = highs[-2]
@@ -1377,7 +1374,6 @@ def _detect_double_patterns(
 
                 current = candles[-1]
 
-                # Confirmation is a CLOSE below neckline.
                 if current["close"] < neckline:
 
                     results.append(
@@ -1393,10 +1389,7 @@ def _detect_double_patterns(
                         )
                     )
 
-    # --------------------------------------------------------
     # DOUBLE BOTTOM
-    # --------------------------------------------------------
-
     if len(lows) >= 2:
 
         l1 = lows[-2]
@@ -1427,7 +1420,6 @@ def _detect_double_patterns(
 
                 current = candles[-1]
 
-                # Confirmation is a CLOSE above neckline.
                 if current["close"] > neckline:
 
                     results.append(
@@ -1454,10 +1446,7 @@ def _detect_head_shoulders(
 ):
     results = []
 
-    # --------------------------------------------------------
     # HEAD & SHOULDERS
-    # --------------------------------------------------------
-
     if len(highs) >= 3:
 
         left = highs[-3]
@@ -1516,10 +1505,7 @@ def _detect_head_shoulders(
                         )
                     )
 
-    # --------------------------------------------------------
     # INVERSE HEAD & SHOULDERS
-    # --------------------------------------------------------
-
     if len(lows) >= 3:
 
         left = lows[-3]
@@ -1605,10 +1591,6 @@ def _detect_triangles(
 
     current = candles[-1]
 
-    # --------------------------------------------------------
-    # ASCENDING TRIANGLE
-    # --------------------------------------------------------
-
     highs_flat = (
         abs(hp1 - hp2) <= tolerance * 1.5
         and
@@ -1642,10 +1624,6 @@ def _detect_triangles(
                 )
             )
 
-    # --------------------------------------------------------
-    # DESCENDING TRIANGLE
-    # --------------------------------------------------------
-
     lows_flat = (
         abs(lp1 - lp2) <= tolerance * 1.5
         and
@@ -1678,10 +1656,6 @@ def _detect_triangles(
                     "Support breakdown confirmed by closing price"
                 )
             )
-
-    # --------------------------------------------------------
-    # SYMMETRICAL TRIANGLE
-    # --------------------------------------------------------
 
     highs_falling_sym = (
         hp2 < hp1 - tolerance * 0.15
@@ -1765,10 +1739,6 @@ def _detect_flags(
         if i >= len(candles) - 20
     ]
 
-    # --------------------------------------------------------
-    # BULL FLAG
-    # --------------------------------------------------------
-
     if move > tolerance * 4:
 
         if len(recent_highs) >= 2 and len(recent_lows) >= 2:
@@ -1817,10 +1787,6 @@ def _detect_flags(
                         "Flag resistance breakout confirmed by close"
                     )
                 )
-
-    # --------------------------------------------------------
-    # BEAR FLAG
-    # --------------------------------------------------------
 
     if move < -tolerance * 4:
 
@@ -1897,10 +1863,6 @@ def _detect_wedges(
 
     current = candles[-1]
 
-    # --------------------------------------------------------
-    # RISING WEDGE
-    # --------------------------------------------------------
-
     highs_rising = (
         hp2 > hp1 + tolerance * 0.15
         and
@@ -1940,10 +1902,6 @@ def _detect_wedges(
                     "Lower wedge boundary breakdown confirmed by close"
                 )
             )
-
-    # --------------------------------------------------------
-    # FALLING WEDGE
-    # --------------------------------------------------------
 
     highs_falling = (
         hp2 < hp1 - tolerance * 0.15
@@ -2020,7 +1978,6 @@ def _detect_range(
         candles
     ) or 1.0
 
-    # Consolidation/range must be reasonably tight.
     if range_size <= atr * 8:
 
         current = candles[-1]
@@ -2136,7 +2093,6 @@ def detect_chart_patterns(candles):
         )
     )
 
-    # Keep only confirmed patterns.
     confirmed = [
         p
         for p in patterns
@@ -2145,7 +2101,6 @@ def detect_chart_patterns(candles):
         and p.get("valid") is True
     ]
 
-    # Newest confirmed patterns first.
     confirmed.sort(
         key=lambda p:
         p.get(
@@ -2357,10 +2312,6 @@ def build_signal(
                 "Buy-side liquidity swept"
             )
 
-    # ========================================================
-    # CONFIRMED CHART PATTERN CONFIRMATION
-    # ========================================================
-
     chart_patterns = chart_patterns or []
 
     bullish_patterns = [
@@ -2408,10 +2359,6 @@ def build_signal(
         reasons.append(
             "Mixed confirmed chart-pattern signals"
         )
-
-    # ========================================================
-    # EXISTING SIGNAL THRESHOLDS
-    # ========================================================
 
     if score >= 6:
         sig = "STRONG BUY"
@@ -2465,15 +2412,30 @@ def smc_analysis(interval="5m"):
         interval
     )
 
-    static_candles = get_gold(
-        interval
-    )
+    # ========================================================
+    # TARGETED FIX:
+    # Copy static candles BEFORE get_gold_with_live() can
+    # modify the cached candle list in-place.
+    #
+    # This keeps historical/static analysis separate from the
+    # current live candle while allowing SMC to react immediately
+    # to the live candle.
+    # ========================================================
 
-    live_candles = get_gold_with_live(
-        interval
-    )
+    static_candles = [
+        dict(c)
+        for c in get_gold(interval)
+    ]
 
-    if len(static_candles) < 40:
+    live_candles = [
+        dict(c)
+        for c in get_gold_with_live(interval)
+    ]
+
+    # SMC analysis uses the current live candle.
+    smc_candles = live_candles
+
+    if len(smc_candles) < 40:
 
         return {
             "status": "INSUFFICIENT_DATA",
@@ -2513,24 +2475,30 @@ def smc_analysis(interval="5m"):
 
     mtf = build_mtf_matrix()
 
+    # ========================================================
+    # TARGETED FIX:
+    # SMC now evaluates the LIVE candle instead of the stale
+    # cached/static candle.
+    # ========================================================
+
     structure = detect_structure(
-        static_candles
+        smc_candles
     )
 
     liq_lines, liq_events = detect_liquidity(
-        static_candles
+        smc_candles
     )
 
     fvg_zones = detect_fvgs(
-        static_candles
+        smc_candles
     )
 
     ob_zones = detect_order_blocks(
-        static_candles
+        smc_candles
     )
 
     pd = calculate_pd(
-        static_candles
+        smc_candles
     )
 
     # ========================================================
@@ -2538,7 +2506,7 @@ def smc_analysis(interval="5m"):
     # ========================================================
 
     chart_patterns = detect_chart_patterns(
-        static_candles
+        smc_candles
     )
 
     pattern_confirmation = get_pattern_confirmation(
@@ -2546,7 +2514,7 @@ def smc_analysis(interval="5m"):
     )
 
     signal_data = build_signal(
-        live_candles,
+        smc_candles,
         interval,
         mtf,
         structure,
@@ -2594,18 +2562,16 @@ def smc_analysis(interval="5m"):
 
     markers = []
 
-    # Existing structure marker.
+    # ========================================================
+    # TARGETED FIX:
+    # Structure events are plotted on the CURRENT analysis
+    # candle instead of the historical swing candle.
+    # ========================================================
+
     if structure["event"]:
 
         markers.append({
-            "time": (
-                static_candles[
-                    structure["index"]
-                ]["time"]
-                if structure["index"] is not None
-                else
-                static_candles[-1]["time"]
-            ),
+            "time": smc_candles[-1]["time"],
             "label": structure["event"],
             "type": "STRUCTURE"
         })
@@ -2622,7 +2588,7 @@ def smc_analysis(interval="5m"):
     # Confirmed chart-pattern markers.
     pattern_markers = build_pattern_markers(
         chart_patterns,
-        static_candles
+        smc_candles
     )
 
     markers.extend(
@@ -2633,8 +2599,6 @@ def smc_analysis(interval="5m"):
     # IMMEDIATE BUY / SELL SIGNAL MARKER
     # ========================================================
     # The marker uses the CURRENT live candle timestamp.
-    # The frontend can therefore plot it as soon as /api/analysis
-    # responds with BUY or SELL.
     # ========================================================
 
     signal = signal_data["signal"]
@@ -2661,7 +2625,11 @@ def smc_analysis(interval="5m"):
                 "type": "SIGNAL",
                 "signal": signal,
                 "direction": "BUY",
-                "size": "tiny",
+
+                # TARGETED FIX:
+                # Lightweight Charts expects a numeric size.
+                "size": 1,
+
                 "fontSize": 8,
                 "immediate": True
             })
@@ -2674,7 +2642,11 @@ def smc_analysis(interval="5m"):
                 "type": "SIGNAL",
                 "signal": signal,
                 "direction": "SELL",
-                "size": "tiny",
+
+                # TARGETED FIX:
+                # Lightweight Charts expects a numeric size.
+                "size": 1,
+
                 "fontSize": 8,
                 "immediate": True
             })
