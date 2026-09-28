@@ -1423,7 +1423,7 @@ def detect_fvgs(
             zone,
             candles,
             zone["createdIndex"],
-            3
+            1
         ):
             continue
 
@@ -1449,7 +1449,7 @@ def detect_order_blocks(
       2. The next candle to break the OB candle.
       3. The next candle to create a valid FVG in the same
          direction.
-      4. Existing three-close violation protection.
+      4. Immediate violation protection after a confirming close.
 
     No alternate OB methodology is introduced here.
     """
@@ -1560,14 +1560,14 @@ def detect_order_blocks(
                 nxt["open"]
             )
             <=
-            avg_body * 1.25
+            avg_body * 1.05
             or
             abs(
                 nxt["close"] -
                 nxt["open"]
             )
             <=
-            atr * 0.35
+            atr * 0.20
         ):
             continue
 
@@ -1656,7 +1656,7 @@ def detect_order_blocks(
             })
 
     # --------------------------------------------------------
-    # Preserve the existing three-close protection.
+    # Remove the OB immediately after one confirming violation close.
     # --------------------------------------------------------
 
     for zone in cands:
