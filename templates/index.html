@@ -2553,6 +2553,7 @@ function resizeChart() {
     chart.applyOptions({
 
       width: width,
+
       height: height
 
     });
@@ -2578,27 +2579,6 @@ function resizeChart() {
 /* ============================================================
    CLEAN CANDLE DATA
    ============================================================ */
-
-/*
- * WICK FIX:
- *
- * The chart itself already supports candle wicks.
- * The important part is ensuring that the OHLC values
- * reaching Lightweight Charts contain a real high/low
- * range around the body.
- *
- * This function:
- *
- * 1. Accepts normal OHLC names.
- * 2. Also accepts o/h/l/c aliases.
- * 3. Ensures HIGH is never below OPEN/CLOSE.
- * 4. Ensures LOW is never above OPEN/CLOSE.
- * 5. Preserves the backend's actual high/low whenever
- *    they are valid.
- * 6. Removes invalid candles.
- * 7. Sorts candles chronologically.
- * 8. Removes duplicate timestamps.
- */
 
 function cleanCandleData(candles) {
 
@@ -2650,18 +2630,6 @@ function cleanCandleData(candles) {
           return null;
 
         }
-
-        /*
-         * The supplied high/low are used when valid.
-         *
-         * We then enforce the fundamental OHLC rules:
-         *
-         * HIGH >= OPEN
-         * HIGH >= CLOSE
-         *
-         * LOW <= OPEN
-         * LOW <= CLOSE
-         */
 
         const high =
           Number.isFinite(rawHigh)
@@ -3152,13 +3120,6 @@ async function loadChartHistory() {
         currentTF
       );
 
-    /*
-     * IMPORTANT:
-     * Load the actual candle endpoint first.
-     * The chart no longer depends on /api/analysis
-     * in order to appear.
-     */
-
     try {
 
       await loadCandlesOnly(
@@ -3185,11 +3146,6 @@ async function loadChartHistory() {
       );
 
     }
-
-    /*
-     * Analysis is loaded separately.
-     * If it fails, the already-loaded chart remains visible.
-     */
 
     try {
 
@@ -3246,10 +3202,6 @@ async function loadChartHistory() {
         "Analysis Load Error:",
         analysisError
       );
-
-      /*
-       * Do NOT clear the chart when analysis fails.
-       */
 
       if (!currentData) {
         currentData = {};
@@ -3345,6 +3297,395 @@ function safeFixed(
 
 
 /* ============================================================
+   NEW: PREPARE SMC MARKERS
+   ============================================================ */
+
+/*
+ * The backend can return markers using either:
+ *
+ *   label
+ *
+ * or Lightweight Charts' native:
+ *
+ *   text
+ *
+ * This function converts them safely.
+ *
+ * It also keeps BUY/SELL markers tiny so they
+ * do not cover the candles.
+ *
+ * Confirmed chart-pattern markers are handled here
+ * as well.
+ */
+
+function prepareSMCMarkers(data) {
+
+  const markers = [];
+
+  /*
+   * Existing backend markers
+   */
+
+  if (Array.isArray(data?.markers)) {
+
+    data.markers.forEach((marker, index) => {
+
+      if (!marker) return;
+
+      const time =
+        Number(
+          marker.time ??
+          marker.timestamp ??
+          marker.t
+        );
+
+      if (!Number.isFinite(time)) {
+        return;
+      }
+
+      const rawLabel =
+        marker.text ??
+        marker.label ??
+        marker.name ??
+        '';
+
+      const label =
+        String(rawLabel).trim();
+
+      if (!label) {
+        return;
+      }
+
+      const upper =
+        label.toUpperCase();
+
+      const isBuy =
+        upper === 'BUY' ||
+        upper === 'STRONG BUY' ||
+        upper.includes('BUY');
+
+      const isSell =
+        upper === 'SELL' ||
+        upper === 'STRONG SELL' ||
+        upper.includes('SELL');
+
+      const markerPosition =
+        marker.position ||
+        (
+          isBuy
+            ? 'belowBar'
+            : isSell
+              ? 'aboveBar'
+              : 'aboveBar'
+        );
+
+      const markerShape =
+        marker.shape ||
+        (
+          isBuy
+            ? 'arrowUp'
+            : isSell
+              ? 'arrowDown'
+              : 'circle'
+        );
+
+      markers.push({
+
+        time: time,
+
+        position:
+          markerPosition,
+
+        color:
+          marker.color ||
+          (
+            isBuy
+              ? '#00ff88'
+              : isSell
+                ? '#ff4444'
+                : '#facc15'
+          ),
+
+        shape:
+          markerShape,
+
+        /*
+         * Lightweight Charts uses marker size rather
+         * than a per-marker CSS font-size.
+         *
+         * Tiny keeps the marker as small as possible.
+         */
+
+        size:
+          Number.isFinite(
+            Number(marker.size)
+          )
+            ? Number(marker.size)
+            : 1,
+
+        text: label,
+
+        id:
+          marker.id ||
+          `smc-marker-${time}-${index}`
+
+      });
+
+    });
+
+  }
+
+
+  /*
+   * CONFIRMED CHART PATTERNS
+   *
+   * Only patterns explicitly marked confirmed=true
+   * or status=CONFIRMED are plotted.
+   */
+
+  if (
+    Array.isArray(
+      data?.chart_patterns
+    )
+  ) {
+
+    data.chart_patterns.forEach(
+      (pattern, index) => {
+
+        if (!pattern) return;
+
+        const confirmed =
+          pattern.confirmed === true ||
+          String(
+            pattern.status ?? ''
+          ).toUpperCase() ===
+            'CONFIRMED';
+
+        if (!confirmed) {
+          return;
+        }
+
+        const time =
+          Number(
+            pattern.time ??
+            pattern.confirmedTime ??
+            pattern.confirmationTime ??
+            pattern.timestamp ??
+            pattern.t
+          );
+
+        if (!Number.isFinite(time)) {
+          return;
+        }
+
+        const direction =
+          String(
+            pattern.direction ??
+            pattern.type ??
+            ''
+          ).toLowerCase();
+
+        const bullish =
+          direction.includes('bull');
+
+        const bearish =
+          direction.includes('bear');
+
+        const patternName =
+          String(
+            pattern.name ??
+            pattern.pattern ??
+            pattern.label ??
+            'CONFIRMED PATTERN'
+          ).trim();
+
+        markers.push({
+
+          time: time,
+
+          position:
+            bullish
+              ? 'belowBar'
+              : bearish
+                ? 'aboveBar'
+                : 'aboveBar',
+
+          color:
+            pattern.color ||
+            (
+              bullish
+                ? '#00ff88'
+                : bearish
+                  ? '#ff4444'
+                  : '#facc15'
+            ),
+
+          shape:
+            bullish
+              ? 'arrowUp'
+              : bearish
+                ? 'arrowDown'
+                : 'circle',
+
+          size: 1,
+
+          text:
+            patternName,
+
+          id:
+            pattern.id ||
+            `confirmed-pattern-${time}-${index}`
+
+        });
+
+      }
+    );
+
+  }
+
+  /*
+   * Some backend versions may return the patterns
+   * under confirmed_patterns instead of chart_patterns.
+   */
+
+  if (
+    Array.isArray(
+      data?.confirmed_patterns
+    )
+  ) {
+
+    data.confirmed_patterns.forEach(
+      (pattern, index) => {
+
+        if (!pattern) return;
+
+        const confirmed =
+          pattern.confirmed === true ||
+          String(
+            pattern.status ?? ''
+          ).toUpperCase() ===
+            'CONFIRMED';
+
+        if (!confirmed) {
+          return;
+        }
+
+        const time =
+          Number(
+            pattern.time ??
+            pattern.confirmedTime ??
+            pattern.confirmationTime ??
+            pattern.timestamp ??
+            pattern.t
+          );
+
+        if (!Number.isFinite(time)) {
+          return;
+        }
+
+        const direction =
+          String(
+            pattern.direction ??
+            pattern.type ??
+            ''
+          ).toLowerCase();
+
+        const bullish =
+          direction.includes('bull');
+
+        const bearish =
+          direction.includes('bear');
+
+        const patternName =
+          String(
+            pattern.name ??
+            pattern.pattern ??
+            pattern.label ??
+            'CONFIRMED PATTERN'
+          ).trim();
+
+        const patternId =
+          pattern.id ||
+          `confirmed-pattern-${time}-${index}`;
+
+        /*
+         * Prevent duplicate pattern markers if the
+         * backend sends the same pattern in both arrays.
+         */
+
+        const alreadyExists =
+          markers.some(
+            m =>
+              m.id === patternId ||
+              (
+                Number(m.time) === time &&
+                m.text === patternName
+              )
+          );
+
+        if (alreadyExists) {
+          return;
+        }
+
+        markers.push({
+
+          time: time,
+
+          position:
+            bullish
+              ? 'belowBar'
+              : bearish
+                ? 'aboveBar'
+                : 'aboveBar',
+
+          color:
+            pattern.color ||
+            (
+              bullish
+                ? '#00ff88'
+                : bearish
+                  ? '#ff4444'
+                  : '#facc15'
+            ),
+
+          shape:
+            bullish
+              ? 'arrowUp'
+              : bearish
+                ? 'arrowDown'
+                : 'circle',
+
+          size: 1,
+
+          text:
+            patternName,
+
+          id:
+            patternId
+
+        });
+
+      }
+    );
+
+  }
+
+  /*
+   * Sort markers chronologically.
+   */
+
+  markers.sort(
+    (a, b) =>
+      Number(a.time) -
+      Number(b.time)
+  );
+
+  return markers;
+
+}
+
+
+/* ============================================================
    PROCESS ANALYSIS DATA
    ============================================================ */
 
@@ -3358,11 +3699,6 @@ function processChartData(d) {
     return;
 
   }
-
-  /*
-   * Preserve the candles already loaded directly from
-   * /api/candles if the analysis response does not contain them.
-   */
 
   const existingCandles =
     currentData &&
@@ -3593,23 +3929,10 @@ function processChartData(d) {
 
   }
 
-  /*
-   * Chart is initialized independently by initializeChart().
-   * Analysis only adds overlays here.
-   */
-
   if (
     initializeChart() &&
     candleSeries
   ) {
-
-    /*
-     * If analysis itself contains valid candles,
-     * use them; otherwise keep the candles from /api/candles.
-     *
-     * cleanCandleData() is also applied here so analysis
-     * candles cannot bypass the wick fix.
-     */
 
     const analysisCandles =
       cleanCandleData(
@@ -3747,41 +4070,71 @@ function drawSMCStructure(data) {
 
   }
 
-  if (data.markers) {
 
-    let filteredMarkers =
-      data.markers.filter(m => {
+  /*
+   * ==========================================================
+   * UPDATED MARKER HANDLING
+   * ==========================================================
+   *
+   * Existing BOS / CHoCH / SWEEP markers remain.
+   *
+   * BUY / SELL markers are now taken from the current
+   * SMC analysis response and plotted immediately.
+   *
+   * Confirmed chart patterns are also plotted here.
+   */
 
-        if (
-          (
-            m.label?.includes('BOS') ||
-            m.label?.includes('CHoCH')
-          ) &&
-          !showBOS
-        ) {
+  const preparedMarkers =
+    prepareSMCMarkers(data);
 
-          return false;
+  let filteredMarkers =
+    preparedMarkers.filter(m => {
 
-        }
+      const label =
+        String(
+          m.text || ''
+        );
 
-        if (
-          m.label?.includes('SWEEP') &&
-          !showLiq
-        ) {
+      if (
+        (
+          label.includes('BOS') ||
+          label.includes('CHoCH')
+        ) &&
+        !showBOS
+      ) {
 
-          return false;
+        return false;
 
-        }
+      }
 
-        return true;
+      if (
+        label.includes('SWEEP') &&
+        !showLiq
+      ) {
 
-      });
+        return false;
 
-    candleSeries.setMarkers(
-      filteredMarkers
-    );
+      }
 
-  }
+      return true;
+
+    });
+
+  /*
+   * Lightweight Charts needs native marker fields.
+   *
+   * BUY/SELL:
+   *   tiny arrow
+   *   current analysis candle time supplied by backend
+   *
+   * Patterns:
+   *   only confirmed patterns
+   *   tiny arrow/circle
+   */
+
+  candleSeries.setMarkers(
+    filteredMarkers
+  );
 
   requestAnimationFrame(
     renderSMCZonesCanvas
@@ -4338,11 +4691,6 @@ document.addEventListener(
 /* ============================================================
    INITIAL STARTUP
    ============================================================ */
-
-/*
- * Initialize the chart BEFORE waiting for the analysis endpoint.
- * This is the key fix for the blank chart problem.
- */
 
 initializeChart();
 
