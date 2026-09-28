@@ -2925,31 +2925,76 @@ function exportChartOnly() {
       'chartContainerBlock'
     );
 
-  html2canvas(
-    chartBlock,
-    {
-      backgroundColor: '#0b0b10',
-      scale: 2
-    }
-  )
-    .then(canvas => {
+  const wasFullscreen =
+    !!document.fullscreenElement;
 
-      let link =
-        document.createElement('a');
+  const capture = () => {
 
-      link.download =
-        `GoldSMC_Chart_${currentTF}_${new Date()
-          .toISOString()
-          .slice(0, 10)}.png`;
+    const width =
+      window.innerWidth;
 
-      link.href =
-        canvas.toDataURL(
-          'image/png'
-        );
+    const height =
+      window.innerHeight;
 
-      link.click();
+    html2canvas(
+      chartBlock,
+      {
+        backgroundColor: '#0b0b10',
+        scale: 2,
+        width: width,
+        height: height,
+        windowWidth: width,
+        windowHeight: height,
+        scrollX: 0,
+        scrollY: 0
+      }
+    )
+      .then(canvas => {
 
-    });
+        let link =
+          document.createElement('a');
+
+        link.download =
+          `GoldSMC_Chart_${currentTF}_${new Date()
+            .toISOString()
+            .slice(0, 10)}.png`;
+
+        link.href =
+          canvas.toDataURL(
+            'image/png'
+          );
+
+        link.click();
+
+      });
+
+  };
+
+  if (!wasFullscreen && chartBlock.requestFullscreen) {
+
+    chartBlock
+      .requestFullscreen()
+      .then(() => {
+
+        setTimeout(() => {
+          capture();
+          setTimeout(() => {
+            if (document.fullscreenElement) {
+              document.exitFullscreen();
+            }
+          }, 100);
+        }, 350);
+
+      })
+      .catch(() => {
+        capture();
+      });
+
+  }
+
+  else {
+    capture();
+  }
 
 }
 
