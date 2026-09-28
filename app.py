@@ -8,7 +8,7 @@ from flask import Flask, jsonify, request, render_template
 app = Flask(__name__)
 SYMBOL = "GC=F"
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/" + SYMBOL
-PRICE_OFFSET = +0
+PRICE_OFFSET = -1.00
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
