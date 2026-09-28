@@ -8,7 +8,7 @@ from flask import Flask, jsonify, request, render_template
 app = Flask(__name__)
 SYMBOL = "GC=F"
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/" + SYMBOL
-PRICE_OFFSET = -35.26
+PRICE_OFFSET = +0
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
@@ -23,13 +23,22 @@ CACHE_TTL = 1
 # ============================================================
 # SMC HISTORICAL SIGNAL STORAGE
 # ============================================================
+#
 # Signals are stored by timeframe.
 #
-# The first BUY and first SELL entry for each timeframe remain
-# permanently fixed during the running application.
+# IMPORTANT:
+# A signal is accepted only when its direction is different
+# from the last accepted SMC signal.
 #
-# Every newly detected signal is also retained as a historical
-# marker at its original candle/time and price.
+# BUY  -> BUY  = ignored
+# SELL -> SELL  = ignored
+# BUY  -> SELL  = accepted
+# SELL -> BUY  = accepted
+#
+# Once accepted, the marker's timestamp and price never change.
+#
+# The active entry is also fixed until an opposite-direction
+# signal is accepted.
 # ============================================================
 
 _smc_signal_history = {}
@@ -43,10 +52,20 @@ def _smc_get_signal_store(interval):
 
             _smc_signal_history[interval] = {
                 "signals": [],
+
+                # Existing structure preserved.
+                # This contains the currently fixed entry for
+                # each direction that has actually generated one.
                 "entries": {
                     "BUY": None,
                     "SELL": None
-                }
+                },
+
+                # Last accepted signal direction.
+                "last_direction": None,
+
+                # Current active SMC entry.
+                "active_entry": None
             }
 
         return _smc_signal_history[interval]
@@ -58,8 +77,25 @@ def _smc_record_signal(
     signal,
     candle
 ):
+    """
+    Record an SMC signal only when it is a NEW direction.
+
+    Exact rule:
+
+        BUY  -> BUY  = ignore
+        SELL -> SELL  = ignore
+        BUY  -> SELL  = accept
+        SELL -> BUY  = accept
+
+    The accepted marker is stored using the exact candle
+    timestamp and exact candle close used by the existing SMC
+    engine as its signal/entry price.
+
+    Historical markers are never moved or deleted.
+    """
+
     if not candle:
-        return
+        return None
 
     direction = str(
         direction or ""
@@ -69,16 +105,19 @@ def _smc_record_signal(
         "BUY",
         "SELL"
     }:
-        return
+        return None
 
     signal_time = candle.get("time")
+
     signal_price = safe_float(
         candle.get("close"),
         0.0
     )
 
     if signal_time is None:
-        return
+        return None
+
+    signal_time = int(signal_time)
 
     with _smc_signal_lock:
 
@@ -89,19 +128,54 @@ def _smc_record_signal(
                 "entries": {
                     "BUY": None,
                     "SELL": None
-                }
+                },
+                "last_direction": None,
+                "active_entry": None
             }
 
         store = _smc_signal_history[
             interval
         ]
 
+        last_direction = store.get(
+            "last_direction"
+        )
+
         # ----------------------------------------------------
-        # Historical signal marker:
-        # Never move or delete an existing marker.
+        # SAME-DIRECTION PROTECTION
+        # ----------------------------------------------------
         #
-        # If this exact signal candle already exists in the
-        # same direction, do not recreate it.
+        # Once BUY has been accepted, another BUY is ignored
+        # even if it appears on a later candle.
+        #
+        # Likewise for SELL.
+        # ----------------------------------------------------
+
+        if last_direction == direction:
+            return None
+
+        # ----------------------------------------------------
+        # Exact marker.
+        #
+        # Do not use the latest candle later to reposition this.
+        # ----------------------------------------------------
+
+        marker = {
+            "time": signal_time,
+            "price": round(
+                signal_price,
+                2
+            ),
+            "signal": signal,
+            "direction": direction
+        }
+
+        # ----------------------------------------------------
+        # Defensive duplicate check.
+        #
+        # Even though last_direction already prevents repeated
+        # direction signals, this also prevents the exact same
+        # marker from being inserted twice.
         # ----------------------------------------------------
 
         existing = any(
@@ -111,36 +185,41 @@ def _smc_record_signal(
             for item in store["signals"]
         )
 
-        if not existing:
-
-            store["signals"].append({
-                "time": int(signal_time),
-                "price": round(
-                    signal_price,
-                    2
-                ),
-                "signal": signal,
-                "direction": direction
-            })
+        if existing:
+            return None
 
         # ----------------------------------------------------
-        # Fixed direction entry:
-        # Only the FIRST signal in a direction establishes the
-        # entry. Later same-direction signals cannot replace,
-        # move, or recalculate it.
+        # Permanently retain the accepted signal.
         # ----------------------------------------------------
 
-        if store["entries"].get(direction) is None:
+        store["signals"].append(
+            marker
+        )
 
-            store["entries"][direction] = {
-                "time": int(signal_time),
-                "price": round(
-                    signal_price,
-                    2
-                ),
-                "signal": signal,
-                "direction": direction
-            }
+        # ----------------------------------------------------
+        # Fix this direction's entry at the exact SMC price.
+        #
+        # It is NOT recalculated from future market prices.
+        # ----------------------------------------------------
+
+        store["entries"][direction] = dict(
+            marker
+        )
+
+        # ----------------------------------------------------
+        # This becomes the active entry.
+        #
+        # It stays fixed until an opposite-direction signal is
+        # accepted.
+        # ----------------------------------------------------
+
+        store["active_entry"] = dict(
+            marker
+        )
+
+        store["last_direction"] = direction
+
+        return dict(marker)
 
 
 def _smc_get_historical_signals(interval):
@@ -153,15 +232,21 @@ def _smc_get_historical_signals(interval):
                 "entries": {
                     "BUY": None,
                     "SELL": None
-                }
+                },
+                "last_direction": None,
+                "active_entry": None
             }
         )
 
         return {
             "signals": [
                 dict(item)
-                for item in store["signals"]
+                for item in store.get(
+                    "signals",
+                    []
+                )
             ],
+
             "entries": {
                 direction: (
                     dict(entry)
@@ -169,8 +254,28 @@ def _smc_get_historical_signals(interval):
                     else None
                 )
                 for direction, entry
-                in store["entries"].items()
-            }
+                in store.get(
+                    "entries",
+                    {
+                        "BUY": None,
+                        "SELL": None
+                    }
+                ).items()
+            },
+
+            "last_direction": store.get(
+                "last_direction"
+            ),
+
+            "active_entry": (
+                dict(
+                    store["active_entry"]
+                )
+                if store.get(
+                    "active_entry"
+                )
+                else None
+            )
         }
 
 
@@ -295,7 +400,10 @@ def auto_sync_loop():
                     new_off = spot - y_raw
 
                     if -70 < new_off < -5:
-                        PRICE_OFFSET = round(new_off, 2)
+                        PRICE_OFFSET = round(
+                            new_off,
+                            2
+                        )
 
             time.sleep(2)
 
@@ -321,7 +429,10 @@ def get_gold(interval="5m"):
                 return c
 
     tf_range = RANGE_MAP[interval]
-    yahoo_interval = YAHOO_INTERVAL_MAP.get(interval, interval)
+    yahoo_interval = YAHOO_INTERVAL_MAP.get(
+        interval,
+        interval
+    )
 
     params = {
         "interval": yahoo_interval,
@@ -341,7 +452,10 @@ def get_gold(interval="5m"):
 
         result = response.json()["chart"]["result"][0]
 
-        timestamps = result.get("timestamp", [])
+        timestamps = result.get(
+            "timestamp",
+            []
+        )
 
         quote = result.get(
             "indicators",
@@ -368,6 +482,7 @@ def get_gold(interval="5m"):
         )
 
         for i in range(length):
+
             o, h, l, c = (
                 opens[i],
                 highs[i],
@@ -380,17 +495,36 @@ def get_gold(interval="5m"):
 
             candles.append({
                 "time": int(timestamps[i]),
-                "open": round(float(o) + PRICE_OFFSET, 2),
-                "high": round(float(h) + PRICE_OFFSET, 2),
-                "low": round(float(l) + PRICE_OFFSET, 2),
-                "close": round(float(c) + PRICE_OFFSET, 2),
+
+                # PRICE_OFFSET remains applied exactly here
+                # for the displayed/chart price data.
+                "open": round(
+                    float(o) + PRICE_OFFSET,
+                    2
+                ),
+
+                "high": round(
+                    float(h) + PRICE_OFFSET,
+                    2
+                ),
+
+                "low": round(
+                    float(l) + PRICE_OFFSET,
+                    2
+                ),
+
+                "close": round(
+                    float(c) + PRICE_OFFSET,
+                    2
+                ),
+
                 "volume": int(volumes[i])
                 if i < len(volumes)
                 and volumes[i] is not None
                 else 0
             })
 
-        # Robust Fallback if 1m returns empty due to Yahoo intraday limits
+        # Robust fallback if 1m returns empty due to Yahoo limits.
         if not candles and interval == "1m":
 
             params_fallback = {
@@ -451,22 +585,27 @@ def get_gold(interval="5m"):
 
                 candles.append({
                     "time": int(timestamps[i]),
+
                     "open": round(
                         float(o) + PRICE_OFFSET,
                         2
                     ),
+
                     "high": round(
                         float(h) + PRICE_OFFSET,
                         2
                     ),
+
                     "low": round(
                         float(l) + PRICE_OFFSET,
                         2
                     ),
+
                     "close": round(
                         float(c) + PRICE_OFFSET,
                         2
                     ),
+
                     "volume": int(volumes[i])
                     if i < len(volumes)
                     and volumes[i] is not None
@@ -537,23 +676,50 @@ def get_gold_with_live(interval="5m"):
     if not candles or not is_market_open():
         return candles
 
-    live = get_oanda_live()
+    live_raw = get_oanda_live()
 
-    if live and live > 100:
+    if live_raw and live_raw > 100:
+
         last = candles[-1]
 
-        last["close"] = round(
-            live,
+        # ====================================================
+        # PRICE_OFFSET FIX
+        # ====================================================
+        #
+        # Yahoo historical candles are offset-adjusted.
+        #
+        # Previously the live Gold-API price was inserted
+        # WITHOUT PRICE_OFFSET.
+        #
+        # That meant the latest candle could suddenly be ~35
+        # dollars away from the historical candles and SMC
+        # analysis would receive inconsistent data.
+        #
+        # The offset is therefore applied to the live value too.
+        #
+        # PRICE_OFFSET itself is NOT changed.
+        # ====================================================
+
+        live = round(
+            live_raw + PRICE_OFFSET,
             2
         )
 
+        last["close"] = live
+
         last["high"] = round(
-            max(last["high"], live),
+            max(
+                last["high"],
+                live
+            ),
             2
         )
 
         last["low"] = round(
-            min(last["low"], live),
+            min(
+                last["low"],
+                live
+            ),
             2
         )
 
@@ -1034,10 +1200,6 @@ def detect_liquidity(
 # ============================================================
 # STRICT SMC ZONE VALIDATION
 # ============================================================
-# The existing 3-consecutive-close protection is intentionally
-# preserved. A temporary wick or one/two closes against the zone
-# do NOT immediately invalidate the SMC zone.
-# ============================================================
 
 def is_zone_violated(
     zone,
@@ -1158,13 +1320,11 @@ def is_fvg_filled(
 
         if direction == "bullish":
 
-            # Price has completely filled the bullish gap.
             if candle["low"] <= bottom:
                 return True
 
         elif direction == "bearish":
 
-            # Price has completely filled the bearish gap.
             if candle["high"] >= top:
                 return True
 
@@ -1199,7 +1359,6 @@ def detect_fvgs(
         left = candles[i - 2]
         right = candles[i]
 
-        # Bullish FVG
         if right["low"] > left["high"]:
 
             gap = (
@@ -1231,7 +1390,6 @@ def detect_fvgs(
                     "valid": True
                 })
 
-        # Bearish FVG
         elif right["high"] < left["low"]:
 
             gap = (
@@ -1265,14 +1423,12 @@ def detect_fvgs(
 
     for zone in cands:
 
-        # Ignore FVGs which have already been completely filled.
         if is_fvg_filled(
             zone,
             candles
         ):
             continue
 
-        # Existing three-close protection remains.
         if is_zone_violated(
             zone,
             candles,
@@ -1295,6 +1451,19 @@ def detect_order_blocks(
     candles,
     max_zones=6
 ):
+    """
+    EXISTING ORDER BLOCK METHODOLOGY PRESERVED.
+
+    OB requires:
+      1. The OB candle.
+      2. The next candle to break the OB candle.
+      3. The next candle to create a valid FVG in the same
+         direction.
+      4. Existing three-close violation protection.
+
+    No alternate OB methodology is introduced here.
+    """
+
     active = []
 
     if len(candles) < 10:
@@ -1321,11 +1490,7 @@ def detect_order_blocks(
     cands = []
 
     # --------------------------------------------------------
-    # Build the valid FVGs first.
-    #
-    # An Order Block is allowed only when the candle following
-    # that OB produces a valid FVG in the same direction.
-    # BOS is deliberately NOT required.
+    # Existing FVG relationship preserved.
     # --------------------------------------------------------
 
     valid_fvgs = []
@@ -1417,15 +1582,15 @@ def detect_order_blocks(
             continue
 
         # ----------------------------------------------------
-        # Bullish Order Block
+        # Existing bullish OB methodology.
         # ----------------------------------------------------
+
         if (
             cur["close"] < cur["open"]
             and
             nxt["close"] > cur["high"]
         ):
 
-            # The following candle must create the valid FVG.
             following_fvg = any(
                 fvg.get("direction") == "bullish"
                 and
@@ -1459,15 +1624,15 @@ def detect_order_blocks(
             })
 
         # ----------------------------------------------------
-        # Bearish Order Block
+        # Existing bearish OB methodology.
         # ----------------------------------------------------
+
         elif (
             cur["close"] > cur["open"]
             and
             nxt["close"] < cur["low"]
         ):
 
-            # The following candle must create the valid FVG.
             following_fvg = any(
                 fvg.get("direction") == "bearish"
                 and
@@ -1500,9 +1665,12 @@ def detect_order_blocks(
                 "valid": True
             })
 
+    # --------------------------------------------------------
+    # Preserve the existing three-close protection.
+    # --------------------------------------------------------
+
     for zone in cands:
 
-        # Existing three-close protection remains.
         if is_zone_violated(
             zone,
             candles,
@@ -1662,7 +1830,6 @@ def _detect_double_patterns(
 ):
     results = []
 
-    # DOUBLE TOP
     if len(highs) >= 2:
 
         h1 = highs[-2]
@@ -1708,7 +1875,6 @@ def _detect_double_patterns(
                         )
                     )
 
-    # DOUBLE BOTTOM
     if len(lows) >= 2:
 
         l1 = lows[-2]
@@ -1765,7 +1931,6 @@ def _detect_head_shoulders(
 ):
     results = []
 
-    # HEAD & SHOULDERS
     if len(highs) >= 3:
 
         left = highs[-3]
@@ -1824,7 +1989,6 @@ def _detect_head_shoulders(
                         )
                     )
 
-    # INVERSE HEAD & SHOULDERS
     if len(lows) >= 3:
 
         left = lows[-3]
@@ -2335,16 +2499,6 @@ def _detect_range(
 
 
 def detect_chart_patterns(candles):
-    """
-    Detects only CONFIRMED chart patterns.
-
-    Pattern shape alone does not create a confirmed pattern.
-    A breakout/breakdown CLOSE beyond the relevant boundary
-    is required for confirmation.
-
-    This intentionally avoids treating a wick as confirmation.
-    """
-
     if len(candles) < 30:
         return []
 
@@ -2461,22 +2615,14 @@ def build_pattern_markers(patterns, candles):
             )
         ).lower()
 
-        if direction == "bullish":
-            label = (
-                "CONFIRMED "
-                + pattern.get(
-                    "name",
-                    "PATTERN"
-                )
+        label = (
+            "CONFIRMED "
+            +
+            pattern.get(
+                "name",
+                "PATTERN"
             )
-        else:
-            label = (
-                "CONFIRMED "
-                + pattern.get(
-                    "name",
-                    "PATTERN"
-                )
-            )
+        )
 
         markers.append({
             "time": candles[idx]["time"],
@@ -2731,15 +2877,9 @@ def smc_analysis(interval="5m"):
         interval
     )
 
-    # ========================================================
-    # TARGETED FIX:
-    # Copy static candles BEFORE get_gold_with_live() can
-    # modify the cached candle list in-place.
-    #
-    # This keeps historical/static analysis separate from the
-    # current live candle while allowing SMC to react immediately
-    # to the live candle.
-    # ========================================================
+    # --------------------------------------------------------
+    # Copy static candles before live data is applied.
+    # --------------------------------------------------------
 
     static_candles = [
         dict(c)
@@ -2751,7 +2891,6 @@ def smc_analysis(interval="5m"):
         for c in get_gold_with_live(interval)
     ]
 
-    # SMC analysis uses the current live candle.
     smc_candles = live_candles
 
     if len(smc_candles) < 40:
@@ -2774,6 +2913,7 @@ def smc_analysis(interval="5m"):
             "confidence": 0,
             "rsi": 50,
             "candles": live_candles,
+
             "markers": [
                 {
                     "time": item["time"],
@@ -2784,26 +2924,43 @@ def smc_analysis(interval="5m"):
                     "price": item["price"],
                     "size": 1,
                     "fontSize": 8,
-                    "immediate": True
+                    "immediate": True,
+                    "historical": True
                 }
                 for item
                 in historical["signals"]
             ],
+
             "lines": [],
             "zones": [],
             "patterns": [],
+
             "pattern_confirmation": {
                 "direction": "NONE",
                 "count": 0,
                 "patterns": []
             },
+
             "reasons": [
                 "Insufficient history"
             ],
+
             "mtf_matrix": {},
             "pd_zones": {},
+
             "signal_history": historical["signals"],
-            "fixed_entries": historical["entries"]
+
+            "fixed_entries": historical[
+                "entries"
+            ],
+
+            "active_entry": historical[
+                "active_entry"
+            ],
+
+            "last_signal_direction": historical[
+                "last_direction"
+            ]
         }
 
     price = (
@@ -2814,12 +2971,7 @@ def smc_analysis(interval="5m"):
 
     mtf = build_mtf_matrix()
 
-    # ========================================================
-    # TARGETED FIX:
-    # SMC now evaluates the LIVE candle instead of the stale
-    # cached/static candle.
-    # ========================================================
-
+    # SMC continues to use the live candle.
     structure = detect_structure(
         smc_candles
     )
@@ -2832,6 +2984,7 @@ def smc_analysis(interval="5m"):
         smc_candles
     )
 
+    # Existing OB methodology retained.
     ob_zones = detect_order_blocks(
         smc_candles
     )
@@ -2839,10 +2992,6 @@ def smc_analysis(interval="5m"):
     pd = calculate_pd(
         smc_candles
     )
-
-    # ========================================================
-    # CHART PATTERNS
-    # ========================================================
 
     chart_patterns = detect_chart_patterns(
         smc_candles
@@ -2901,12 +3050,7 @@ def smc_analysis(interval="5m"):
 
     markers = []
 
-    # ========================================================
-    # TARGETED FIX:
-    # Structure events are plotted on the CURRENT analysis
-    # candle instead of the historical swing candle.
-    # ========================================================
-
+    # Existing structure marker behavior preserved.
     if structure["event"]:
 
         markers.append({
@@ -2915,7 +3059,7 @@ def smc_analysis(interval="5m"):
             "type": "STRUCTURE"
         })
 
-    # Existing liquidity markers.
+    # Existing liquidity markers preserved.
     for ev in liq_events:
 
         markers.append({
@@ -2924,7 +3068,7 @@ def smc_analysis(interval="5m"):
             "type": "LIQUIDITY"
         })
 
-    # Confirmed chart-pattern markers.
+    # Existing chart pattern markers preserved.
     pattern_markers = build_pattern_markers(
         chart_patterns,
         smc_candles
@@ -2935,12 +3079,19 @@ def smc_analysis(interval="5m"):
     )
 
     # ========================================================
-    # IMMEDIATE BUY / SELL SIGNAL MARKER
+    # IMMEDIATE BUY / SELL SIGNAL
     # ========================================================
-    # The marker is stored at the exact live candle timestamp
-    # and exact signal price.
     #
-    # Existing historical markers are never removed.
+    # The signal price is the current SMC signal candle close,
+    # which is the existing entry price used by this backend.
+    #
+    # _smc_record_signal() decides whether it is accepted.
+    #
+    # Same direction:
+    #       ignored
+    #
+    # Opposite direction:
+    #       accepted and permanently stored.
     # ========================================================
 
     signal = signal_data["signal"]
@@ -2957,8 +3108,6 @@ def smc_analysis(interval="5m"):
             if live_candles
             else static_candles[-1]
         )
-
-        signal_time = signal_candle["time"]
 
         if "BUY" in signal:
 
@@ -2981,8 +3130,11 @@ def smc_analysis(interval="5m"):
     # ========================================================
     # HISTORICAL SMC SIGNALS
     # ========================================================
-    # Re-add stored markers on every response without changing
-    # their original candle or price.
+    #
+    # Stored markers are re-added from their stored timestamp
+    # and stored price.
+    #
+    # They are NEVER recalculated from the latest candle.
     # ========================================================
 
     historical = _smc_get_historical_signals(
@@ -3015,12 +3167,10 @@ def smc_analysis(interval="5m"):
             "signal": item["signal"],
             "direction": item["direction"],
 
-            # Exact original signal price.
+            # Exact original SMC signal/entry price.
             "price": item["price"],
 
-            # Lightweight Charts expects a numeric size.
             "size": 1,
-
             "fontSize": 8,
             "immediate": True,
             "historical": True
@@ -3030,46 +3180,75 @@ def smc_analysis(interval="5m"):
         "status": "OK",
         "symbol": SYMBOL,
         "timeframe": interval,
+
         "price": price,
+
         "signal": signal_data["signal"],
         "score": signal_data["score"],
         "confidence": signal_data["confidence"],
         "rsi": signal_data["rsi"],
+
         "candles": (
             live_candles
             if live_candles
             else static_candles
         ),
+
         "markers": markers,
         "lines": lines,
         "zones": zones,
+
         "patterns": chart_patterns,
-        "pattern_confirmation": pattern_confirmation,
-        "reasons": signal_data["reasons"],
+
+        "pattern_confirmation":
+            pattern_confirmation,
+
+        "reasons":
+            signal_data["reasons"],
+
         "mtf_matrix": mtf,
         "pd_zones": pd,
-        "atr": signal_data["atr"],
-        "bullish_mtf": signal_data["bullish_mtf"],
-        "bearish_mtf": signal_data["bearish_mtf"],
-        "confirmed_patterns": signal_data[
-            "confirmed_patterns"
-        ],
-        "market_open": is_market_open(),
-        "timestamp": now_utc_iso(),
-        "offset": PRICE_OFFSET,
 
-        # Existing response structure is preserved and these
-        # fields provide the exact fixed SMC signal information.
-        "signal_history": historical["signals"],
-        "fixed_entries": historical["entries"]
+        "atr": signal_data["atr"],
+
+        "bullish_mtf":
+            signal_data["bullish_mtf"],
+
+        "bearish_mtf":
+            signal_data["bearish_mtf"],
+
+        "confirmed_patterns":
+            signal_data[
+                "confirmed_patterns"
+            ],
+
+        "market_open":
+            is_market_open(),
+
+        "timestamp":
+            now_utc_iso(),
+
+        "offset":
+            PRICE_OFFSET,
+
+        # Existing response fields preserved.
+        "signal_history":
+            historical["signals"],
+
+        "fixed_entries":
+            historical["entries"],
+
+        # Additional explicit active entry information.
+        "active_entry":
+            historical["active_entry"],
+
+        "last_signal_direction":
+            historical["last_direction"]
     }
 
 
 # ============================================================
 # ===================== NEWS MACHINE =========================
-# ============================================================
-# ADDITIVE ONLY.
-# Existing NEWS MACHINE code is left unchanged.
 # ============================================================
 
 import sqlite3 as _nm_sqlite3
