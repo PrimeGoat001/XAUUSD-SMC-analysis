@@ -392,18 +392,25 @@ def auto_sync_loop():
 
     while True:
         try:
-            if is_market_open():
-                y_raw = get_yahoo_raw_close()
-                spot = get_spot_live()
+            y_raw = get_yahoo_raw_close()
+            spot = get_spot_live()
 
-                if y_raw and spot:
-                    new_off = spot - y_raw
+            if y_raw and spot:
+                new_off = spot - y_raw
 
-                    if -70 < new_off < -5:
-                        PRICE_OFFSET = round(
-                            new_off,
-                            2
-                        )
+                # The difference between Yahoo GC=F and the live XAU
+                # spot feed can be positive or negative.  Do not restrict
+                # it to the old -70..-5 range.
+                if -100 < new_off < 100:
+                    new_off = round(new_off, 2)
+
+                    if new_off != PRICE_OFFSET:
+                        PRICE_OFFSET = new_off
+
+                        # Discard candles built with the previous offset
+                        # so the next request immediately uses the new one.
+                        with _cache_lock:
+                            _cache.clear()
 
             time.sleep(2)
 
@@ -470,6 +477,29 @@ def get_gold(interval="5m"):
         lows = quote.get("low", [])
         closes = quote.get("close", [])
         volumes = quote.get("volume", [])
+
+        # Synchronize the price level at fetch time as well as in the
+        # background loop.  This is important on Render because the chart
+        # request must not depend on a background thread having already
+        # updated PRICE_OFFSET.
+        global PRICE_OFFSET
+        raw_closes = [
+            float(value)
+            for value in closes
+            if value is not None
+        ]
+
+        if raw_closes:
+            live_spot = get_spot_live()
+
+            if live_spot and live_spot > 1000:
+                live_offset = round(
+                    live_spot - raw_closes[-1],
+                    2
+                )
+
+                if -100 < live_offset < 100:
+                    PRICE_OFFSET = live_offset
 
         candles = []
 
