@@ -17,7 +17,7 @@ VALID_TFS = {"1m", "5m", "15m", "30m", "1h", "1d"}
 YAHOO_INTERVAL_MAP = {"1m": "1m","5m": "5m","15m": "15m","30m": "30m","1h": "60m","1d": "1d"}
 _cache = {}
 _cache_lock = threading.Lock()
-CACHE_TTL = 1
+CACHE_TTL = 0.25
 
 
 # ============================================================
