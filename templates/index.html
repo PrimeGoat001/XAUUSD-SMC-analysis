@@ -290,45 +290,17 @@
       </label>
 
       <label class="flex items-center gap-1 cursor-pointer whitespace-nowrap">
-        <input type="checkbox" id="toggle-sr" checked
+        <input type="checkbox" id="toggle-bos" checked
           onchange="requestAnimationFrame(renderSMCZonesCanvas)"
           class="accent-yellow-400">
-        Support/Resistance
-      </label>
-
-      <label class="flex items-center gap-1 cursor-pointer whitespace-nowrap">
-        <input type="checkbox" id="toggle-bos" checked
-          onchange="requestAnimationFrame(drawSMCStructure)"
-          class="accent-yellow-400">
-        BOS
-      </label>
-
-      <label class="flex items-center gap-1 cursor-pointer whitespace-nowrap">
-        <input type="checkbox" id="toggle-mss" checked
-          onchange="requestAnimationFrame(drawSMCStructure)"
-          class="accent-yellow-400">
-        MSS
-      </label>
-
-      <label class="flex items-center gap-1 cursor-pointer whitespace-nowrap">
-        <input type="checkbox" id="toggle-choch" checked
-          onchange="requestAnimationFrame(drawSMCStructure)"
-          class="accent-yellow-400">
-        CHoCH
+        CHoCH/BOS
       </label>
 
       <label class="flex items-center gap-1 cursor-pointer whitespace-nowrap">
         <input type="checkbox" id="toggle-liq" checked
-          onchange="requestAnimationFrame(drawSMCStructure)"
+          onchange="requestAnimationFrame(renderSMCZonesCanvas)"
           class="accent-yellow-400">
-        Liquidity Sweep
-      </label>
-
-      <label class="flex items-center gap-1 cursor-pointer whitespace-nowrap">
-        <input type="checkbox" id="toggle-setups" checked
-          onchange="requestAnimationFrame(drawSMCStructure)"
-          class="accent-yellow-400">
-        BUY/SELL Setups
+        Liquidity
       </label>
 
       <label class="flex items-center gap-1 cursor-pointer whitespace-nowrap">
@@ -485,20 +457,6 @@
 
         </div>
 
-      </div>
-
-    </div>
-
-    <div
-      id="smcCommentary"
-      class="bg-[#111119] border border-white/5 rounded-[24px] p-4">
-
-      <div class="text-[10px] text-yellow-400 font-bold uppercase tracking-widest">
-        SMC Commentary
-      </div>
-
-      <div class="mt-2 text-xs text-white/50 font-mono">
-        Loading SMC Commentary...
       </div>
 
     </div>
@@ -765,10 +723,7 @@ let chart,
     isInitialLoad = true,
     cachedNewsEvents = [],
     tfDataCache = {},
-    currentFetchController = null,
-    pendingChartVisibleRange = null,
-    exportCaptureInProgress = false,
-    exportSavedVisibleRange = null;
+    currentFetchController = null;
 
 
 /* ============================================================
@@ -787,9 +742,6 @@ function isGoldMarketClosedNow() {
 
   if (d === 0 && h < 22) return true;
 
-  // Daily XAU/USD market break: Monday-Thursday 21:00-22:00 UTC.
-  if (d >= 1 && d <= 4 && h >= 21 && h < 22) return true;
-
   return false;
 }
 
@@ -806,7 +758,6 @@ function updateMarketSessionsAndClock() {
   const utcHour = now.getUTCHours();
 
   let isWeekend = false;
-  let marketBreak = isGoldMarketClosedNow();
   let target = new Date(now);
 
   if (utcDay === 6) {
@@ -910,7 +861,6 @@ function updateMarketSessionsAndClock() {
 
       let isOpen =
         !isWeekend &&
-        !marketBreak &&
         (
           s.open < s.close
             ? (
@@ -1127,6 +1077,114 @@ function toggleNewsModal(open) {
    NEWS ANALYSIS MODAL
    ============================================================ */
 
+async function refreshNewsAnalysisData() {
+
+  try {
+
+    const response =
+      await fetch('/api/news-analysis');
+
+    if (!response.ok) {
+      throw new Error('News analysis request failed');
+    }
+
+    const analysis =
+      await response.json();
+
+    const analysisEvent =
+      analysis && analysis.event;
+
+    if (analysisEvent) {
+
+      const eventId =
+        analysisEvent.id;
+
+      const eventDate =
+        analysisEvent.date;
+
+      const eventTitle =
+        analysisEvent.title;
+
+      let found = false;
+
+      cachedNewsEvents =
+        (Array.isArray(cachedNewsEvents)
+          ? cachedNewsEvents
+          : []
+        ).map(event => {
+
+          const sameEvent =
+            (
+              eventId &&
+              analysisEvent.id &&
+              String(eventId) ===
+              String(analysisEvent.id)
+            ) ||
+            (
+              eventDate &&
+              event.date &&
+              String(eventDate) ===
+              String(event.date) &&
+              String(eventTitle || '') ===
+              String(event.title || '')
+            );
+
+          if (!sameEvent) {
+            return event;
+          }
+
+          found = true;
+
+          return {
+            ...event,
+            ...analysisEvent,
+            prediction: analysis.prediction,
+            confidence: analysis.confidence,
+            evidence_score: analysis.evidence_score,
+            reason: analysis.reason,
+            historical_matches:
+              analysis.historical_matches,
+            aligned: analysis.aligned,
+            celebration: analysis.celebration,
+            analysis_status: analysis.status
+          };
+
+        });
+
+      if (!found) {
+
+        cachedNewsEvents.push({
+          ...analysisEvent,
+          prediction: analysis.prediction,
+          confidence: analysis.confidence,
+          evidence_score: analysis.evidence_score,
+          reason: analysis.reason,
+          historical_matches:
+            analysis.historical_matches,
+          aligned: analysis.aligned,
+          celebration: analysis.celebration,
+          analysis_status: analysis.status
+        });
+
+      }
+
+    }
+
+  }
+
+  catch (error) {
+
+    console.error(
+      '[NEWS ANALYSIS]',
+      error
+    );
+
+  }
+
+  renderNewsAnalysis();
+}
+
+
 function toggleNewsAnalysis(open = true) {
 
   const modal =
@@ -1143,7 +1201,7 @@ function toggleNewsAnalysis(open = true) {
 
   if (open) {
 
-    renderNewsAnalysis();
+    refreshNewsAnalysisData();
 
   }
 }
@@ -2762,54 +2820,6 @@ function cleanCandleData(candles) {
 
 
 /* ============================================================
-   CHART VIEW RANGE HELPERS
-   ============================================================ */
-
-function getChartVisibleRangeSafe() {
-
-  if (!chart) return null;
-
-  try {
-
-    const range =
-      chart.timeScale().getVisibleRange();
-
-    return range
-      ? {
-          from: range.from,
-          to: range.to
-        }
-      : null;
-
-  }
-
-  catch (e) {
-
-    return null;
-
-  }
-
-}
-
-
-function restoreChartVisibleRangeSafe(range) {
-
-  if (!chart || !range) return;
-
-  try {
-
-    chart
-      .timeScale()
-      .setVisibleRange(range);
-
-  }
-
-  catch (e) {}
-
-}
-
-
-/* ============================================================
    LOAD CANDLES DIRECTLY
    ============================================================ */
 
@@ -2858,10 +2868,6 @@ async function loadCandlesOnly(
 
   }
 
-  const savedVisibleRange =
-    pendingChartVisibleRange ||
-    getChartVisibleRangeSafe();
-
   candleSeries.setData(
     candles
   );
@@ -2873,25 +2879,13 @@ async function loadCandlesOnly(
   currentData.candles =
     candles;
 
-  if (savedVisibleRange) {
-
-    requestAnimationFrame(() => {
-
-      restoreChartVisibleRangeSafe(
-        savedVisibleRange
-      );
-
-      renderSMCZonesCanvas();
-
-    });
-
-  }
-
-  else if (isInitialLoad) {
+  if (isInitialLoad) {
 
     chart
       .timeScale()
       .fitContent();
+
+    isInitialLoad = false;
 
   }
 
@@ -2902,9 +2896,6 @@ async function loadCandlesOnly(
     );
 
   }
-
-  pendingChartVisibleRange = null;
-  isInitialLoad = false;
 
   return candles;
 
@@ -2928,9 +2919,6 @@ function changeTimeframe(
     return;
 
   }
-
-  pendingChartVisibleRange =
-    getChartVisibleRangeSafe();
 
   currentTF = tf;
   isInitialLoad = true;
@@ -3029,7 +3017,7 @@ function changeTimeframe(
   ).innerText =
     `${tf.toUpperCase()} SMC Canvas`;
 
-  loadChartHistory(true);
+  loadChartHistory();
 
 }
 
@@ -3040,130 +3028,84 @@ function changeTimeframe(
 
 function exportChartOnly() {
 
-  const chartBlock =
+  let chartBlock =
     document.getElementById(
       'chartContainerBlock'
     );
 
-  if (!chartBlock) return;
-
-  exportSavedVisibleRange =
-    getChartVisibleRangeSafe();
+  const wasFullscreen =
+    !!document.fullscreenElement;
 
   const capture = () => {
 
-    resizeChart();
+    const width =
+      window.innerWidth;
 
-    if (exportSavedVisibleRange) {
+    const height =
+      window.innerHeight;
 
-      restoreChartVisibleRangeSafe(
-        exportSavedVisibleRange
-      );
+    html2canvas(
+      chartBlock,
+      {
+        backgroundColor: '#0b0b10',
+        scale: 2,
+        width: width,
+        height: height,
+        windowWidth: width,
+        windowHeight: height,
+        scrollX: 0,
+        scrollY: 0
+      }
+    )
+      .then(canvas => {
 
-    }
+        let link =
+          document.createElement('a');
 
-    requestAnimationFrame(() => {
+        link.download =
+          `GoldSMC_Chart_${currentTF}_${new Date()
+            .toISOString()
+            .slice(0, 10)}.png`;
 
-      requestAnimationFrame(() => {
+        link.href =
+          canvas.toDataURL(
+            'image/png'
+          );
 
-        const width =
-          chartBlock.clientWidth;
-
-        const height =
-          chartBlock.clientHeight;
-
-        html2canvas(
-          chartBlock,
-          {
-            backgroundColor: '#0b0b10',
-            scale: 2,
-            width: width,
-            height: height,
-            windowWidth: width,
-            windowHeight: height,
-            scrollX: 0,
-            scrollY: 0,
-            useCORS: true
-          }
-        )
-          .then(canvas => {
-
-            const link =
-              document.createElement('a');
-
-            link.download =
-              `GoldSMC_Chart_${currentTF}_${new Date()
-                .toISOString()
-                .slice(0, 10)}.png`;
-
-            link.href =
-              canvas.toDataURL(
-                'image/png'
-              );
-
-            link.click();
-
-          })
-          .catch(error => {
-
-            console.error(
-              'Chart image export error:',
-              error
-            );
-
-          })
-          .finally(() => {
-
-            exportCaptureInProgress = false;
-            exportSavedVisibleRange = null;
-
-            if (document.fullscreenElement) {
-
-              document.exitFullscreen();
-
-            }
-
-          });
+        link.click();
 
       });
 
-    });
-
   };
 
-  exportCaptureInProgress = true;
-
-  if (
-    !document.fullscreenElement &&
-    chartBlock.requestFullscreen
-  ) {
+  if (!wasFullscreen && chartBlock.requestFullscreen) {
 
     chartBlock
       .requestFullscreen()
       .then(() => {
 
-        setTimeout(
-          capture,
-          400
-        );
+        setTimeout(() => {
+          capture();
+          setTimeout(() => {
+            if (document.fullscreenElement) {
+              document.exitFullscreen();
+            }
+          }, 100);
+        }, 350);
 
       })
       .catch(() => {
-
-        exportCaptureInProgress = false;
         capture();
-
       });
 
   }
 
   else {
-
     capture();
-
   }
 
 }
+
 
 /* ============================================================
    LOAD NEWS EVENTS
@@ -3292,7 +3234,7 @@ async function loadNewsEvents() {
    LOAD CHART HISTORY
    ============================================================ */
 
-async function loadChartHistory(showLoading = false) {
+async function loadChartHistory() {
 
   if (currentFetchController) {
 
@@ -3311,7 +3253,7 @@ async function loadChartHistory(showLoading = false) {
       'chartLoadingOverlay'
     );
 
-  if (loadingOverlay && showLoading) {
+  if (loadingOverlay) {
 
     loadingOverlay.classList.remove(
       'opacity-0',
@@ -3448,7 +3390,7 @@ async function loadChartHistory(showLoading = false) {
       currentFetchController
     ) {
 
-      if (loadingOverlay && showLoading) {
+      if (loadingOverlay) {
 
         loadingOverlay.classList.remove(
           'opacity-100'
@@ -3643,36 +3585,6 @@ function prepareSMCMarkers(data) {
       });
 
     });
-
-  }
-
-
-  if (
-    data?.mss &&
-    data.mss.direction &&
-    data.mss.direction !== 'NONE' &&
-    Array.isArray(data.candles)
-  ) {
-
-    const mssCandle = data.candles[Number(data.mss.index)];
-    const mssTime = Number(mssCandle?.time);
-
-    if (
-      Number.isFinite(mssTime) &&
-      (data.mss.direction === 'bullish' || data.mss.direction === 'bearish')
-    ) {
-
-      markers.push({
-        time: mssTime,
-        position: data.mss.direction === 'bullish' ? 'belowBar' : 'aboveBar',
-        color: data.mss.direction === 'bullish' ? '#00ff88' : '#ff4444',
-        shape: data.mss.direction === 'bullish' ? 'arrowUp' : 'arrowDown',
-        size: 1,
-        text: data.mss.state || 'MSS',
-        id: `mss-marker-${mssTime}-${data.mss.direction}`
-      });
-
-    }
 
   }
 
@@ -3973,6 +3885,15 @@ function processChartData(d) {
         ? 'text-red-400'
         : 'text-yellow-400';
 
+  // Display the persistent SMC entry when one exists.
+  // d.price remains the live market price for all other UI logic.
+  const displayEntry =
+    d.active_entry &&
+    d.active_entry.price !== undefined &&
+    d.active_entry.price !== null
+      ? d.active_entry.price
+      : d.price;
+
   if (d.mtf_matrix) {
 
     let matrixHTML =
@@ -4059,7 +3980,7 @@ function processChartData(d) {
 
       <div class="mt-1 text-xs font-mono text-white/60">
 
-        $${safeFixed(d.price, 2, '0.00')}
+        $${safeFixed(displayEntry, 2, '0.00')}
 
         ${
           d.market_open === false
@@ -4170,33 +4091,6 @@ function processChartData(d) {
 
   }
 
-  const commentaryBox =
-    document.getElementById('smcCommentary');
-
-  if (commentaryBox) {
-
-    const comments =
-      Array.isArray(d.smc_commentary?.comments)
-        ? d.smc_commentary.comments
-        : Array.isArray(d.smc_commentary)
-          ? d.smc_commentary
-          : [];
-
-    const srLevels =
-      Array.isArray(d.support_resistance)
-        ? d.support_resistance
-        : [];
-
-    commentaryBox.innerHTML = `
-      <div class="text-[10px] text-yellow-400 font-bold uppercase tracking-widest">SMC Commentary</div>
-      ${srLevels.length ? `<div class="mt-2 flex flex-wrap gap-1">${srLevels.map(x => `<span class="text-[10px] bg-white/[0.06] border border-white/5 px-2 py-0.5 rounded-full text-white/70">${String(x.label || x.type || 'S/R')} @ $${safeFixed(x.price, 2, '0.00')} — ${String(x.status || 'TESTED')}</span>`).join('')}</div>` : ''}
-      <div class="mt-2 space-y-1.5">
-        ${comments.length ? comments.map(x => `<div class="text-[11px] leading-relaxed text-white/80">• ${String(x)}</div>`).join('') : '<div class="text-[11px] text-white/50">No additional SMC commentary available.</div>'}
-      </div>
-    `;
-
-  }
-
   if (
     initializeChart() &&
     candleSeries
@@ -4261,29 +4155,9 @@ function drawSMCStructure(data) {
       'toggle-bos'
     );
 
-  const mssToggle =
-    document.getElementById(
-      'toggle-mss'
-    );
-
-  const chochToggle =
-    document.getElementById(
-      'toggle-choch'
-    );
-
   const liqToggle =
     document.getElementById(
       'toggle-liq'
-    );
-
-  const setupToggle =
-    document.getElementById(
-      'toggle-setups'
-    );
-
-  const srToggle =
-    document.getElementById(
-      'toggle-sr'
     );
 
   let showBOS =
@@ -4291,51 +4165,19 @@ function drawSMCStructure(data) {
       ? bosToggle.checked
       : true;
 
-  let showMSS =
-    mssToggle
-      ? mssToggle.checked
-      : true;
-
-  let showCHoCH =
-    chochToggle
-      ? chochToggle.checked
-      : true;
-
   let showLiq =
     liqToggle
       ? liqToggle.checked
-      : true;
-
-  let showSetups =
-    setupToggle
-      ? setupToggle.checked
-      : true;
-
-  let showSR =
-    srToggle
-      ? srToggle.checked
       : true;
 
   if (data.lines) {
 
     data.lines.forEach(l => {
 
-      const lineTitle =
-        String(l.title || '').toUpperCase();
-
-      const isSRLine =
-        lineTitle.includes('SUPPORT') ||
-        lineTitle.includes('RESISTANCE');
-
       if (
         (
           l.layer === 'structure' &&
-          !isSRLine &&
           !showBOS
-        ) ||
-        (
-          isSRLine &&
-          !showSR
         ) ||
         (
           l.layer === 'liquidity' &&
@@ -4391,28 +4233,6 @@ function drawSMCStructure(data) {
   }
 
 
-  if (
-    data.mss &&
-    data.mss.direction &&
-    data.mss.direction !== 'NONE' &&
-    showMSS &&
-    Number.isFinite(Number(data.mss.level))
-  ) {
-
-    const mssLine = candleSeries.createPriceLine({
-      price: Number(data.mss.level),
-      color: data.mss.direction === 'bullish' ? '#00ff88' : '#ff4444',
-      lineWidth: 1,
-      lineStyle: 0,
-      axisLabelVisible: true,
-      title: data.mss.state || 'MSS'
-    });
-
-    activePriceLines.push(mssLine);
-
-  }
-
-
   /*
    * ==========================================================
    * UPDATED MARKER HANDLING
@@ -4438,25 +4258,10 @@ function drawSMCStructure(data) {
         );
 
       if (
-        label.includes('MSS') &&
-        !showMSS
-      ) {
-
-        return false;
-
-      }
-
-      if (
-        label.includes('CHoCH') &&
-        !showCHoCH
-      ) {
-
-        return false;
-
-      }
-
-      if (
-        label.includes('BOS') &&
+        (
+          label.includes('BOS') ||
+          label.includes('CHoCH')
+        ) &&
         !showBOS
       ) {
 
@@ -4467,20 +4272,6 @@ function drawSMCStructure(data) {
       if (
         label.includes('SWEEP') &&
         !showLiq
-      ) {
-
-        return false;
-
-      }
-
-      if (
-        (
-          label === 'BUY' ||
-          label === 'STRONG BUY' ||
-          label === 'SELL' ||
-          label === 'STRONG SELL'
-        ) &&
-        !showSetups
       ) {
 
         return false;
@@ -4559,11 +4350,6 @@ function renderSMCZonesCanvas() {
       'toggle-ob'
     );
 
-  const srToggle =
-    document.getElementById(
-      'toggle-sr'
-    );
-
   const fvgToggle =
     document.getElementById(
       'toggle-fvg'
@@ -4577,11 +4363,6 @@ function renderSMCZonesCanvas() {
   let showOB =
     obToggle
       ? obToggle.checked
-      : true;
-
-  let showSR =
-    srToggle
-      ? srToggle.checked
       : true;
 
   let showFVG =
@@ -4749,19 +4530,6 @@ function renderSMCZonesCanvas() {
     data.zones || [];
 
   zones.forEach(zone => {
-
-    if (
-      (
-        zone.layer === 'support' ||
-        zone.layer === 'resistance' ||
-        zone.layer === 'sr'
-      ) &&
-      !showSR
-    ) {
-
-      return;
-
-    }
 
     if (
       zone.layer === 'ob' &&
@@ -5066,16 +4834,15 @@ document.addEventListener(
 
       resizeChart();
 
-      if (isFull) {
+      if (chart) {
 
-        restoreChartVisibleRangeSafe(
-          exportSavedVisibleRange ||
-          getChartVisibleRangeSafe()
-        );
+        chart
+          .timeScale()
+          .fitContent();
+
+        renderSMCZonesCanvas();
 
       }
-
-      renderSMCZonesCanvas();
 
     }, 300);
 
@@ -5093,7 +4860,7 @@ updateMarketSessionsAndClock();
 
 loadNewsEvents();
 
-loadChartHistory(false);
+loadChartHistory();
 
 setInterval(
   updateRealtimeTick,
@@ -5101,7 +4868,7 @@ setInterval(
 );
 
 setInterval(
-  () => loadChartHistory(false),
+  loadChartHistory,
   30000
 );
 
@@ -5109,6 +4876,8 @@ setInterval(
 /* ============================================================
    NEWS ANALYSIS AUTO REFRESH
    ============================================================ */
+
+let lastNewsAnalysisRefresh = 0;
 
 setInterval(() => {
 
@@ -5125,6 +4894,19 @@ setInterval(() => {
   ) {
 
     renderNewsAnalysis();
+
+    if (
+      Date.now() -
+      lastNewsAnalysisRefresh >=
+      10000
+    ) {
+
+      lastNewsAnalysisRefresh =
+        Date.now();
+
+      refreshNewsAnalysisData();
+
+    }
 
   }
 
