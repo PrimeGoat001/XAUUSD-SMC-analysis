@@ -3966,12 +3966,23 @@ function processChartData(d) {
 
   }
 
+  const lockedSignalText =
+    String(d.signal || '').toUpperCase();
+
   let color =
-    d.score > 0
-      ? 'text-green-400'
-      : d.score < 0
-        ? 'text-red-400'
-        : 'text-yellow-400';
+    d.signal_locked
+      ? (
+          lockedSignalText.includes('BUY')
+            ? 'text-green-400'
+            : lockedSignalText.includes('SELL')
+              ? 'text-red-400'
+              : 'text-yellow-400'
+        )
+      : d.score > 0
+        ? 'text-green-400'
+        : d.score < 0
+          ? 'text-red-400'
+          : 'text-yellow-400';
 
   if (d.mtf_matrix) {
 
@@ -4059,7 +4070,19 @@ function processChartData(d) {
 
       <div class="mt-1 text-xs font-mono text-white/60">
 
-        $${safeFixed(d.price, 2, '0.00')}
+        $${safeFixed(
+          d.signal_locked && d.entry_price != null
+            ? d.entry_price
+            : d.price,
+          2,
+          '0.00'
+        )}
+
+        ${
+          d.signal_locked
+            ? '<span class="text-white/40">(ENTRY)</span>'
+            : ''
+        }
 
         ${
           d.market_open === false
