@@ -3867,102 +3867,6 @@ def _nm_is_usd_event(event):
     }
 
 
-def _nm_finance_calendar_fallback():
-    """Fallback high-impact calendar used by both news endpoints."""
-    try:
-        today = datetime.now(timezone.utc).date()
-        end_date = datetime.fromtimestamp(
-            time.time() + (6 * 86400),
-            timezone.utc
-        ).date()
-
-        response = SESSION.get(
-            "https://www.financecalendar.com/wp-json/fc/v1/calendar",
-            params={
-                "from": today.isoformat(),
-                "to": end_date.isoformat(),
-                "impact": "high",
-                "limit": 100
-            },
-            timeout=7
-        )
-
-        if response.status_code != 200:
-            return []
-
-        payload = response.json()
-        raw_events = payload.get("data", [])
-
-        if not isinstance(raw_events, list):
-            return []
-
-        events = []
-
-        for raw in raw_events:
-            if not isinstance(raw, dict):
-                continue
-
-            currency = str(
-                raw.get("currency", raw.get("country", ""))
-            ).strip().upper()
-
-            if currency not in {
-                "USD", "US", "UNITED STATES", "USA"
-            }:
-                continue
-
-            impact = str(
-                raw.get("impact", "")
-            ).strip().lower()
-
-            if impact != "high":
-                continue
-
-            event_time = (
-                raw.get("time_utc")
-                or raw.get("scheduledAt")
-                or raw.get("date")
-            )
-
-            title = (
-                raw.get("title")
-                or raw.get("name")
-                or raw.get("eventName")
-                or ""
-            )
-
-            events.append({
-                "id": raw.get("id") or raw.get("event_id"),
-                "title": str(title).strip(),
-                "country": "USD",
-                "date": event_time or "",
-                "impact": "High",
-                "previous": (
-                    raw.get("previous")
-                    if raw.get("previous") is not None
-                    else raw.get("prior")
-                ),
-                "forecast": (
-                    raw.get("forecast")
-                    if raw.get("forecast") is not None
-                    else raw.get("consensus")
-                ),
-                "actual": raw.get("actual")
-            })
-
-        events.sort(
-            key=lambda event: str(event.get("date", ""))
-        )
-
-        return events
-
-    except Exception as exc:
-        print(
-            f"[NEWS MACHINE FALLBACK CALENDAR] {exc}"
-        )
-        return []
-
-
 def _nm_get_calendar():
     global _nm_last_calendar
     global _nm_calendar_time
@@ -3970,75 +3874,97 @@ def _nm_get_calendar():
     now = time.time()
 
     with _nm_lock:
-        if (
-            now - _nm_calendar_time
-            < NM_CALENDAR_REFRESH
-        ):
-            return list(_nm_last_calendar)
 
-    events = []
+        if (
+            now -
+            _nm_calendar_time
+            <
+            NM_CALENDAR_REFRESH
+        ):
+            return list(
+                _nm_last_calendar
+            )
 
     try:
+
         response = SESSION.get(
             "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
             timeout=5
         )
 
-        if response.status_code == 200:
-            data = response.json()
+        if response.status_code != 200:
+            return list(
+                _nm_last_calendar
+            )
 
-            if isinstance(data, list):
-                for raw in data:
-                    if not isinstance(raw, dict):
-                        continue
+        data = response.json()
+        events = []
 
-                    impact = str(
-                        raw.get("impact", "")
-                    ).strip().lower()
+        for raw in data:
 
-                    country = str(
-                        raw.get("country", "")
-                    ).strip().upper()
+            impact = raw.get(
+                "impact",
+                ""
+            )
 
-                    if impact != "high":
-                        continue
+            country = raw.get(
+                "country",
+                ""
+            )
 
-                    if country not in {
-                        "USD", "US", "UNITED STATES", "USA"
-                    }:
-                        continue
+            if str(
+                impact
+            ).lower() != "high":
+                continue
 
-                    events.append({
-                        "id": raw.get("id"),
-                        "title": raw.get("title", ""),
-                        "country": "USD",
-                        "date": raw.get("date", ""),
-                        "impact": "High",
-                        "previous": raw.get("previous"),
-                        "forecast": raw.get("forecast"),
-                        "actual": raw.get("actual")
-                    })
+            if not _nm_is_usd_event({
+                "country": country
+            }):
+                continue
+
+            events.append({
+                "id": raw.get("id"),
+                "title": raw.get(
+                    "title",
+                    ""
+                ),
+                "country": (
+                    country
+                    or
+                    "USD"
+                ),
+                "date": raw.get(
+                    "date",
+                    ""
+                ),
+                "impact": "High",
+                "previous": raw.get(
+                    "previous"
+                ),
+                "forecast": raw.get(
+                    "forecast"
+                ),
+                "actual": raw.get(
+                    "actual"
+                )
+            })
+
+        with _nm_lock:
+
+            _nm_last_calendar = events
+            _nm_calendar_time = now
+
+        return events
 
     except Exception as exc:
+
         print(
             f"[NEWS MACHINE CALENDAR] {exc}"
         )
 
-    if not events:
-        events = _nm_finance_calendar_fallback()
-
-    events.sort(
-        key=lambda event: str(event.get("date", ""))
-    )
-
-    if events:
-        with _nm_lock:
-            _nm_last_calendar = events
-            _nm_calendar_time = now
-        return list(events)
-
-    with _nm_lock:
-        return list(_nm_last_calendar)
+        return list(
+            _nm_last_calendar
+        )
 
 
 def _nm_google_news(query):
@@ -5385,7 +5311,7 @@ def _nm_get_current():
         timezone.utc
     )
 
-    parsed_events = []
+    high_events_today = []
 
     for event in events:
 
@@ -5398,21 +5324,21 @@ def _nm_get_current():
         if not event_time:
             continue
 
-        parsed_events.append(
+        if event_time.date() != now.date():
+            continue
+
+        high_events_today.append(
             (
                 event,
                 event_time
             )
         )
 
-    parsed_events.sort(
+    high_events_today.sort(
         key=lambda x: x[1]
     )
 
-    # Evaluate the complete returned calendar, not only today's
-    # events, so News Analysis stays synchronized with News for
-    # upcoming high-impact USD events later in the week.
-    for event, event_time in parsed_events:
+    for event, event_time in high_events_today:
 
         minutes_until = (
             event_time - now
@@ -5462,10 +5388,8 @@ def _nm_get_current():
         ).total_seconds() / 60
 
         if (
-            0 <=
-            minutes_after
-            <=
-            NM_EVENT_AFTER_MINUTES
+            0 <= minutes_after
+            <= NM_EVENT_AFTER_MINUTES
         ):
 
             stored = _nm_get_prediction(
@@ -5487,16 +5411,14 @@ def _nm_get_current():
                     aligned
                     and
                     NM_CELEBRATION_START
-                    <=
-                    minutes_after
-                    <=
-                    NM_CELEBRATION_END
+                    <= minutes_after
+                    <= NM_CELEBRATION_END
                 )
 
             later_events = [
                 e
                 for e, t
-                in parsed_events
+                in high_events_today
                 if t > event_time
             ]
 
@@ -5549,7 +5471,7 @@ def _nm_get_current():
             event_time
         )
         for event, event_time
-        in parsed_events
+        in high_events_today
         if event_time > now
     ]
 
@@ -5563,11 +5485,7 @@ def _nm_get_current():
             "prediction": None,
             "confidence": None,
             "evidence_score": None,
-            "reason": (
-                "Upcoming high-impact USD event. "
-                "Analysis will enter the prediction window "
-                f"{NM_EVENT_BEFORE_MINUTES} minutes before release."
-            ),
+            "reason": None,
             "historical_matches": 0,
             "aligned": False,
             "celebration": False,
@@ -5797,84 +5715,53 @@ def api_news():
 
     try:
 
-        # Use the same normalized calendar used by News Analysis.
-        events = _nm_get_calendar()
-        analysis = _nm_get_current()
-        analysis_event = analysis.get("event")
-        analysis_key = (
-            _nm_event_key(analysis_event)
-            if analysis_event
-            else None
+        r = SESSION.get(
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+            timeout=2
         )
 
-        high = []
+        if r.status_code == 200:
 
-        for ev in events:
+            data = r.json()
+            high = []
 
-            item = dict(ev)
-            item["analysis_status"] = "ANALYSIS ONGOING"
-            item["prediction"] = None
-            item["confidence"] = None
-            item["evidence_score"] = None
-            item["reason"] = None
-            item["historical_matches"] = 0
-            item["aligned"] = False
-            item["celebration"] = False
+            for ev in data:
 
-            if (
-                analysis_key is not None
-                and
-                _nm_event_key(item) == analysis_key
-            ):
+                if (
+                    str(ev.get("impact", "")).strip().lower()
+                    ==
+                    "high"
+                    and
+                    str(ev.get("country", "")).strip().upper()
+                    in
+                    [
+                        "USD",
+                        "US"
+                    ]
+                ):
 
-                item["analysis_status"] = analysis.get(
-                    "status"
-                )
-                item["prediction"] = analysis.get(
-                    "prediction"
-                )
-                item["confidence"] = analysis.get(
-                    "confidence"
-                )
-                item["evidence_score"] = analysis.get(
-                    "evidence_score"
-                )
-                item["reason"] = analysis.get(
-                    "reason"
-                )
-                item["historical_matches"] = analysis.get(
-                    "historical_matches",
-                    0
-                )
-                item["aligned"] = analysis.get(
-                    "aligned",
-                    False
-                )
-                item["celebration"] = analysis.get(
-                    "celebration",
-                    False
-                )
+                    high.append({
+                        "title": ev.get(
+                            "title",
+                            ""
+                        ),
+                        "date": ev.get(
+                            "date",
+                            ""
+                        ),
+                        "country": ev.get(
+                            "country",
+                            "USD"
+                        ),
+                        "impact": "High"
+                    })
 
-            high.append(item)
+            _news_cache["data"] = high[:5]
+            _news_cache["time"] = now
 
-        high.sort(
-            key=lambda ev: (
-                _nm_parse_time(
-                    ev.get("date")
-                ) or datetime.max.replace(
-                    tzinfo=timezone.utc
-                )
+            return jsonify(
+                high[:5]
             )
-        )
-
-        high = high[:5]
-
-        _news_cache["data"] = high
-        _news_cache["time"] = now
-
-        return jsonify(
-            high
-        )
 
     except Exception as e:
 
