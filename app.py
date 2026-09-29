@@ -781,10 +781,18 @@ def calculate_atr(candles, period=14):
     if len(candles) < period + 1:
         return 0.0
 
+    # The existing result uses only the final `period` true ranges.
+    # Calculate only those ranges instead of building true ranges for
+    # the entire candle history. The returned ATR is unchanged.
+    start = max(
+        1,
+        len(candles) - period
+    )
+
     true_ranges = []
 
     for i in range(
-        1,
+        start,
         len(candles)
     ):
         c = candles[i]
@@ -806,9 +814,7 @@ def calculate_atr(candles, period=14):
 
     return (
         round(
-            sum(
-                true_ranges[-period:]
-            ) / period,
+            sum(true_ranges) / period,
             4
         )
         if true_ranges
@@ -822,6 +828,29 @@ def find_swing_highs(
     right=2
 ):
     res = []
+
+    # The SMC engine uses the existing 2/2 swing definition.
+    # Direct comparisons avoid generator/max overhead while keeping
+    # the exact same >= left / > right rule.
+    if left == 2 and right == 2:
+        for i in range(
+            2,
+            len(candles) - 2
+        ):
+            h = candles[i]["high"]
+
+            if (
+                h >= candles[i - 2]["high"]
+                and
+                h >= candles[i - 1]["high"]
+                and
+                h > candles[i + 1]["high"]
+                and
+                h > candles[i + 2]["high"]
+            ):
+                res.append(i)
+
+        return res
 
     for i in range(
         left,
@@ -857,6 +886,29 @@ def find_swing_lows(
     right=2
 ):
     res = []
+
+    # The SMC engine uses the existing 2/2 swing definition.
+    # Direct comparisons avoid generator/min overhead while keeping
+    # the exact same <= left / < right rule.
+    if left == 2 and right == 2:
+        for i in range(
+            2,
+            len(candles) - 2
+        ):
+            l = candles[i]["low"]
+
+            if (
+                l <= candles[i - 2]["low"]
+                and
+                l <= candles[i - 1]["low"]
+                and
+                l < candles[i + 1]["low"]
+                and
+                l < candles[i + 2]["low"]
+            ):
+                res.append(i)
+
+        return res
 
     for i in range(
         left,
@@ -1191,76 +1243,199 @@ def detect_liquidity(
 # STRICT SMC ZONE VALIDATION
 # ============================================================
 
-def is_zone_violated(
-    zone,
-    candles,
-    created_index,
-    confirm_bars=3
-):
+def _zone_state(zone, candles):
+    """Evaluate a zone using the agreed two-candle violation rule.
+
+    A wick through a boundary is not enough to invalidate a zone.
+    The first body close beyond the invalidation boundary is a
+    potential violation. A second consecutive close beyond that
+    boundary confirms the violation. If the next candle reclaims
+    the zone, the zone remains valid/respected.
+    """
     if not candles:
-        return False
+        return {"status": "invalid", "confirmed": False, "retested": False, "respected": False}
 
-    top = safe_float(
-        zone.get("top"),
-        None
-    )
+    top = safe_float(zone.get("top"), None)
+    bottom = safe_float(zone.get("bottom"), None)
+    direction = str(zone.get("direction", "")).lower()
+    created_time = zone.get("createdTime")
 
-    bottom = safe_float(
-        zone.get("bottom"),
-        None
-    )
+    if top is None or bottom is None or created_time is None:
+        return {"status": "invalid", "confirmed": False, "retested": False, "respected": False}
 
-    direction = str(
-        zone.get(
-            "direction",
-            ""
-        )
-    ).lower()
+    post = [c for c in candles if c.get("time", 0) > created_time]
+    if not post:
+        return {"status": "valid", "confirmed": False, "retested": False, "respected": False}
 
-    if top is None or bottom is None:
-        return True
+    moved_away = False
+    retested = False
+    respected = False
+    potential = False
 
-    if created_index is None or created_index < 0:
-        created_index = 0
+    for idx, candle in enumerate(post):
+        close = safe_float(candle.get("close"), None)
+        high = safe_float(candle.get("high"), None)
+        low = safe_float(candle.get("low"), None)
+        if close is None or high is None or low is None:
+            continue
 
-    if (
-        len(candles) -
-        (created_index + 1)
-        <
-        confirm_bars
-    ):
-        return False
+        if direction == "bullish":
+            if close > top:
+                moved_away = True
+            touched = low <= top and high >= bottom
+            potential_break = close < bottom
+        elif direction == "bearish":
+            if close < bottom:
+                moved_away = True
+            touched = high >= bottom and low <= top
+            potential_break = close > top
+        else:
+            return {"status": "invalid", "confirmed": False, "retested": False, "respected": False}
 
-    last_closes = [
-        safe_float(
-            candles[j].get("close"),
-            None
-        )
-        for j in range(
-            len(candles) -
-            confirm_bars,
-            len(candles)
-        )
-    ]
+        if moved_away and touched:
+            retested = True
+            # A touch/retest that closes back on the valid side is a respect.
+            if direction == "bullish" and close >= bottom:
+                respected = True
+            elif direction == "bearish" and close <= top:
+                respected = True
 
-    if direction == "bullish":
+        if potential_break:
+            potential = True
+            # Only the immediately following candle confirms/rejects the break.
+            if idx + 1 < len(post):
+                next_close = safe_float(post[idx + 1].get("close"), None)
+                if next_close is not None:
+                    if direction == "bullish":
+                        if next_close < bottom:
+                            return {"status": "violated", "confirmed": True, "retested": retested, "respected": respected}
+                        if next_close >= bottom:
+                            respected = True
+                            potential = False
+                    else:
+                        if next_close > top:
+                            return {"status": "violated", "confirmed": True, "retested": retested, "respected": respected}
+                        if next_close <= top:
+                            respected = True
+                            potential = False
 
-        return all(
-            c is not None
-            and c < bottom
-            for c in last_closes
-        )
+    if retested and respected:
+        return {"status": "respected", "confirmed": True, "retested": True, "respected": True}
+    if potential:
+        return {"status": "potential_violation", "confirmed": False, "retested": retested, "respected": respected}
+    return {"status": "valid", "confirmed": False, "retested": retested, "respected": respected}
 
-    elif direction == "bearish":
 
-        return all(
-            c is not None
-            and c > top
-            for c in last_closes
-        )
+def is_zone_violated(zone, candles, created_index=None, confirm_bars=2):
+    return _zone_state(zone, candles).get("status") == "violated"
 
-    return False
 
+# ============================================================
+# FVG FILLED / MITIGATION CHECK
+# ============================================================
+
+def is_fvg_filled(zone, candles):
+    # A touch is not a violation. FVG lifecycle is governed by the
+    # same two-candle confirmation rule as every other SMC zone.
+    return _zone_state(zone, candles).get("status") == "violated"
+
+
+def _add_zone_state(zone, candles):
+    state = _zone_state(zone, candles)
+    zone["status"] = state["status"]
+    zone["confirmed"] = bool(state["confirmed"])
+    zone["retested"] = bool(state["retested"])
+    zone["respected"] = bool(state["respected"])
+    zone["valid"] = state["status"] != "violated"
+    return zone
+
+
+def detect_fvgs(candles, max_zones=6):
+    active = []
+    if len(candles) < 5:
+        return active
+
+    atr = calculate_atr(candles) or 1.0
+    min_gap = atr * 0.10
+    start = max(2, len(candles) - 80)
+    cands = []
+
+    for i in range(start, len(candles)):
+        left = candles[i - 2]
+        right = candles[i]
+        if right["low"] > left["high"]:
+            gap = right["low"] - left["high"]
+            if gap >= min_gap:
+                cands.append({
+                    "type": "Bullish FVG", "label": "BULLISH FVG", "direction": "bullish",
+                    "top": round(right["low"], 2), "bottom": round(left["high"], 2),
+                    "timeStart": left["time"], "createdTime": right["time"],
+                    "createdIndex": i, "color": "rgba(0,255,136,0.16)",
+                    "borderColor": "#00ff88", "layer": "fvg", "valid": True
+                })
+        elif right["high"] < left["low"]:
+            gap = left["low"] - right["high"]
+            if gap >= min_gap:
+                cands.append({
+                    "type": "Bearish FVG", "label": "BEARISH FVG", "direction": "bearish",
+                    "top": round(left["low"], 2), "bottom": round(right["high"], 2),
+                    "timeStart": left["time"], "createdTime": right["time"],
+                    "createdIndex": i, "color": "rgba(255,68,68,0.16)",
+                    "borderColor": "#ff4444", "layer": "fvg", "valid": True
+                })
+
+    for zone in cands:
+        _add_zone_state(zone, candles)
+        if zone.get("status") == "violated":
+            continue
+        zone.pop("createdIndex", None)
+        active.append(zone)
+
+    return active[-max_zones:]
+
+
+def detect_order_blocks(candles, max_zones=6):
+    """Independent OB engine. OB validity never depends on an FVG."""
+    active = []
+    if len(candles) < 10:
+        return active
+
+    atr = calculate_atr(candles) or 1.0
+    avg_body = sum(abs(c["close"] - c["open"]) for c in candles[-20:]) / min(20, len(candles))
+    start = max(2, len(candles) - 80)
+    cands = []
+
+    for i in range(start, len(candles) - 1):
+        cur = candles[i]
+        nxt = candles[i + 1]
+        body = abs(nxt["close"] - nxt["open"])
+        # Retain the previously agreed relaxed displacement thresholds.
+        if body <= avg_body * 1.05 or body <= atr * 0.20:
+            continue
+
+        if cur["close"] < cur["open"] and nxt["close"] > cur["high"]:
+            cands.append({
+                "type": "Bullish Order Block", "label": "BULLISH OB", "direction": "bullish",
+                "top": round(cur["high"], 2), "bottom": round(cur["low"], 2),
+                "timeStart": cur["time"], "createdTime": nxt["time"], "createdIndex": i + 1,
+                "color": "rgba(34,197,94,0.18)", "borderColor": "#22c55e", "layer": "ob", "valid": True
+            })
+        elif cur["close"] > cur["open"] and nxt["close"] < cur["low"]:
+            cands.append({
+                "type": "Bearish Order Block", "label": "BEARISH OB", "direction": "bearish",
+                "top": round(cur["high"], 2), "bottom": round(cur["low"], 2),
+                "timeStart": cur["time"], "createdTime": nxt["time"], "createdIndex": i + 1,
+                "color": "rgba(239,68,68,0.18)", "borderColor": "#ef4444", "layer": "ob", "valid": True
+            })
+
+    for zone in cands:
+        _add_zone_state(zone, candles)
+        if zone.get("status") == "violated":
+            continue
+        zone.pop("createdIndex", None)
+        active.append(zone)
+
+    return active[-max_zones:]
 
 # ============================================================
 # FVG FILLED / MITIGATION CHECK
@@ -1323,8 +1498,7 @@ def is_fvg_filled(
 
 def detect_fvgs(
     candles,
-    max_zones=6,
-    preserve_metadata=False
+    max_zones=6
 ):
     active = []
 
@@ -1428,11 +1602,10 @@ def detect_fvgs(
         ):
             continue
 
-        if not preserve_metadata:
-            zone.pop(
-                "createdIndex",
-                None
-            )
+        zone.pop(
+            "createdIndex",
+            None
+        )
 
         active.append(zone)
 
@@ -1441,7 +1614,6 @@ def detect_fvgs(
 
 def detect_order_blocks(
     candles,
-    fvg_zones=None,
     max_zones=6
 ):
     """
@@ -1483,18 +1655,71 @@ def detect_order_blocks(
     cands = []
 
     # --------------------------------------------------------
-    # FVGs are supplied by the independent FVG engine.
-    # The OB engine may use them for confirmation, but it does
-    # not create, delete, or mutate FVG zones.
+    # Existing FVG relationship preserved.
     # --------------------------------------------------------
 
-    valid_fvgs = [
-        dict(zone)
-        for zone in (fvg_zones or [])
-        if zone.get("valid") is True
-        and zone.get("status") == "active"
-        and zone.get("createdIndex") is not None
-    ]
+    valid_fvgs = []
+
+    for i in range(
+        start,
+        len(candles)
+    ):
+
+        if i < 2:
+            continue
+
+        left = candles[i - 2]
+        right = candles[i]
+
+        if right["low"] > left["high"]:
+
+            gap = (
+                right["low"] -
+                left["high"]
+            )
+
+            if gap >= atr * 0.10:
+
+                fvg = {
+                    "direction": "bullish",
+                    "createdTime": right["time"],
+                    "createdIndex": i,
+                    "top": right["low"],
+                    "bottom": left["high"]
+                }
+
+                if not is_fvg_filled(
+                    fvg,
+                    candles
+                ):
+                    valid_fvgs.append(
+                        fvg
+                    )
+
+        elif right["high"] < left["low"]:
+
+            gap = (
+                left["low"] -
+                right["high"]
+            )
+
+            if gap >= atr * 0.10:
+
+                fvg = {
+                    "direction": "bearish",
+                    "createdTime": right["time"],
+                    "createdIndex": i,
+                    "top": left["low"],
+                    "bottom": right["high"]
+                }
+
+                if not is_fvg_filled(
+                    fvg,
+                    candles
+                ):
+                    valid_fvgs.append(
+                        fvg
+                    )
 
     for i in range(
         start,
@@ -2630,6 +2855,230 @@ def get_pattern_confirmation(patterns):
     }
 
 
+def detect_mss(candles):
+    """Detect MSS as a displacement-based structural shift.
+
+    Bullish MSS: bearish structure (lower high/lower low) is weakening,
+    then price displaces and closes above the latest lower high.
+    Bearish MSS: bullish structure (higher high/higher low) is weakening,
+    then price displaces and closes below the latest higher low.
+    """
+    result = {"state": "NONE", "direction": "NONE", "level": None, "index": None, "displacement": False}
+    if len(candles) < 25:
+        return result
+
+    sh = find_swing_highs(candles, 2, 2)
+    sl = find_swing_lows(candles, 2, 2)
+    if len(sh) < 2 or len(sl) < 2:
+        return result
+
+    atr = calculate_atr(candles) or 1.0
+    avg_body = sum(abs(c["close"] - c["open"]) for c in candles[-20:]) / min(20, len(candles))
+    displacement_min = max(avg_body * 1.05, atr * 0.20)
+
+    h1, h2 = candles[sh[-2]]["high"], candles[sh[-1]]["high"]
+    l1, l2 = candles[sl[-2]]["low"], candles[sl[-1]]["low"]
+    c = candles[-1]
+    body = abs(c["close"] - c["open"])
+
+    # Bearish trend weakening -> bullish MSS through the latest lower high.
+    if h2 < h1 and l2 < l1:
+        protected_high = h2
+        if c["close"] > protected_high and c["close"] > c["open"] and body >= displacement_min:
+            return {"state": "BULLISH MSS", "direction": "bullish", "level": protected_high, "index": sh[-1], "displacement": True}
+
+    # Bullish trend weakening -> bearish MSS through the latest higher low.
+    if h2 > h1 and l2 > l1:
+        protected_low = l2
+        if c["close"] < protected_low and c["close"] < c["open"] and body >= displacement_min:
+            return {"state": "BEARISH MSS", "direction": "bearish", "level": protected_low, "index": sl[-1], "displacement": True}
+
+    return result
+
+def detect_support_resistance(candles, max_levels=4):
+    """Independent S/R engine with confirmed-break and flip lifecycle."""
+    if len(candles) < 20:
+        return []
+    sh = find_swing_highs(candles, 2, 2)
+    sl = find_swing_lows(candles, 2, 2)
+    atr = calculate_atr(candles) or 1.0
+    tolerance = max(atr * 0.12, 0.05)
+    levels = []
+
+    def level_state(price, kind, idx):
+        status = "TESTED"
+        broken_at = None
+        potential = None
+        retested = False
+        rejected = False
+        for j in range(idx + 1, len(candles)):
+            c = candles[j]
+            close = c["close"]
+            touched = c["low"] <= price + tolerance and c["high"] >= price - tolerance
+            if touched:
+                status = "TESTED"
+            if kind == "RESISTANCE":
+                if close > price:
+                    if potential is None:
+                        potential = j
+                    elif j == potential + 1:
+                        broken_at = j
+                        status = "BROKEN"
+                        potential = None
+                elif potential is not None and j == potential + 1 and close <= price:
+                    potential = None
+                    status = "TESTED"
+                if broken_at is not None and j > broken_at:
+                    if c["low"] <= price + tolerance and close >= price:
+                        retested = True
+                        rejected = close >= price
+                        if rejected:
+                            status = "CONFIRMED"
+            else:
+                if close < price:
+                    if potential is None:
+                        potential = j
+                    elif j == potential + 1:
+                        broken_at = j
+                        status = "BROKEN"
+                        potential = None
+                elif potential is not None and j == potential + 1 and close >= price:
+                    potential = None
+                    status = "TESTED"
+                if broken_at is not None and j > broken_at:
+                    if c["high"] >= price - tolerance and close <= price:
+                        retested = True
+                        rejected = close <= price
+                        if rejected:
+                            status = "CONFIRMED"
+        return status, broken_at, retested, rejected
+
+    for idx in sh[-max_levels:]:
+        p = round(candles[idx]["high"], 2)
+        status, broken_at, retested, rejected = level_state(p, "RESISTANCE", idx)
+        if status in {"BROKEN", "CONFIRMED"}:
+            direction = "support"
+            label = "FLIPPED SUPPORT" if status == "CONFIRMED" else "RESISTANCE BROKEN"
+            strategy_direction = "bullish" if status == "CONFIRMED" else "bullish"
+        else:
+            direction = "resistance"
+            label = "RESISTANCE"
+            strategy_direction = "bearish"
+        levels.append({"type":"Resistance", "label":label, "direction":strategy_direction, "price":p,
+                       "kind":direction, "status":status, "broken":broken_at is not None,
+                       "retested":retested, "respected":rejected, "index":idx,
+                       "lineStyle":0, "layer":"structure"})
+
+    for idx in sl[-max_levels:]:
+        p = round(candles[idx]["low"], 2)
+        status, broken_at, retested, rejected = level_state(p, "SUPPORT", idx)
+        if status in {"BROKEN", "CONFIRMED"}:
+            direction = "resistance"
+            label = "FLIPPED RESISTANCE" if status == "CONFIRMED" else "SUPPORT BROKEN"
+            strategy_direction = "bearish"
+        else:
+            direction = "support"
+            label = "SUPPORT"
+            strategy_direction = "bullish"
+        levels.append({"type":"Support", "label":label, "direction":strategy_direction, "price":p,
+                       "kind":direction, "status":status, "broken":broken_at is not None,
+                       "retested":retested, "respected":rejected, "index":idx,
+                       "lineStyle":0, "layer":"structure"})
+
+    # Keep the closest/recent levels and remove near-duplicates.
+    levels.sort(key=lambda x: x["index"], reverse=True)
+    out=[]
+    for level in levels:
+        if any(abs(level["price"]-x["price"]) <= tolerance for x in out):
+            continue
+        out.append(level)
+        if len(out) >= max_levels:
+            break
+    return out
+
+
+def build_smc_commentary(structure, mss, liq_events, fvg_zones, ob_zones, sr_levels, signal_data):
+    comments=[]
+    confirmed=[]
+    waits=[]
+
+    for z in fvg_zones:
+        d=z.get("direction")
+        name="bullish FVG" if d=="bullish" else "bearish FVG"
+        if z.get("status")=="respected" and z.get("confirmed"):
+            confirmed.append(name)
+            comments.append(f"{name.upper()} RESPECTED — confirmation present after a retest without a confirmed violation.")
+        elif z.get("status")=="potential_violation":
+            waits.append(name)
+            comments.append(f"WAIT — {name.upper()} HAS A POTENTIAL VIOLATION. Wait for the second candle to confirm a break or reclaim the zone.")
+        elif z.get("retested"):
+            waits.append(name)
+            comments.append(f"WAIT — {name.upper()} RETESTED. It has not yet produced confirmed respect; wait for the zone to hold.")
+        else:
+            waits.append(name)
+            comments.append(f"Wait for price to retest the {name} and respect the zone before considering a {'BUY' if d=='bullish' else 'SELL'} setup.")
+
+    for z in ob_zones:
+        d=z.get("direction")
+        name="bullish OB" if d=="bullish" else "bearish OB"
+        if z.get("status")=="respected" and z.get("confirmed"):
+            confirmed.append(name)
+            comments.append(f"{name.upper()} RESPECTED — confirmation present after a retest without a confirmed violation.")
+        elif z.get("status")=="potential_violation":
+            waits.append(name)
+            comments.append(f"WAIT — {name.upper()} HAS A POTENTIAL VIOLATION. Wait for the second candle to confirm or reclaim the zone.")
+        elif z.get("retested"):
+            waits.append(name)
+            comments.append(f"WAIT — {name.upper()} RETESTED. Wait for price to hold the zone before considering a setup.")
+        else:
+            waits.append(name)
+            comments.append(f"Wait for price to retest the {name} without violating the zone before considering a {'BUY' if d=='bullish' else 'SELL'} setup.")
+
+    for s in sr_levels:
+        if s.get("status")=="CONFIRMED":
+            confirmed.append(s["label"])
+            comments.append(f"{s['label'].upper()} CONFIRMED — the break and retest respected the flipped level.")
+        elif s.get("status")=="BROKEN":
+            waits.append(s["label"])
+            comments.append(f"WAIT — {s['label'].upper()} has a first break. Wait for the second candle to confirm the break, then watch the retest.")
+        else:
+            comments.append(f"{s['label']} is {s.get('status','TESTED')}. A wick through the level alone does not flip it.")
+
+    if mss.get("direction") == "bullish":
+        confirmed.append("bullish MSS")
+        comments.append("STRUCTURE SHIFT — BULLISH MSS detected with displacement through the structural level.")
+    elif mss.get("direction") == "bearish":
+        confirmed.append("bearish MSS")
+        comments.append("STRUCTURE SHIFT — BEARISH MSS detected with displacement through the structural level.")
+    else:
+        comments.append("MSS: no qualifying displacement-based market structure shift is currently detected.")
+
+    if structure.get("event"):
+        comments.append(f"Structure event: {structure['event']} at {structure.get('level')}.")
+    else:
+        comments.append(f"Structure state: {structure.get('state','NEUTRAL')}.")
+
+    for ev in liq_events:
+        if ev.get("type")=="SELL_SIDE_SWEEP":
+            comments.append("LIQUIDITY SWEPT — SELL-SIDE liquidity has been swept. Wait for bullish structure confirmation and a valid FVG/OB or S/R retest.")
+        elif ev.get("type")=="BUY_SIDE_SWEEP":
+            comments.append("LIQUIDITY SWEPT — BUY-SIDE liquidity has been swept. Wait for bearish structure confirmation and a valid FVG/OB or S/R retest.")
+
+    if confirmed:
+        comments.append("CONFLUENCE: " + ", ".join(confirmed) + ". Respect/confirmation quality is weighted ahead of raw setup count.")
+    else:
+        comments.append("CONFLUENCE: no independently confirmed SMC setup is currently present; WAIT for the relevant setup to be respected/confirmed.")
+
+    if signal_data.get("signal") in {"BUY","STRONG BUY"}:
+        comments.append("STRONG BUY SETUP CONFIRMED. Independent bullish SMC evidence is currently respected/confirmed.")
+    elif signal_data.get("signal") in {"SELL","STRONG SELL"}:
+        comments.append("STRONG SELL SETUP CONFIRMED. Independent bearish SMC evidence is currently respected/confirmed.")
+    else:
+        comments.append("WAIT — no independently confirmed directional SMC setup currently meets the confirmation requirements.")
+
+    return comments
+
+
 def build_signal(
     candles,
     interval,
@@ -2639,217 +3088,127 @@ def build_signal(
     fvg_zones,
     ob_zones,
     pd,
-    chart_patterns=None
+    chart_patterns=None,
+    mss=None,
+    sr_levels=None
 ):
     price = candles[-1]["close"]
-
-    rsi = calculate_rsi(
-        [
-            c["close"]
-            for c in candles
-        ]
-    )
-
-    score = 0
+    rsi = calculate_rsi([c["close"] for c in candles])
     reasons = []
-
-    bull = sum(
-        1
-        for v in mtf.values()
-        if v == "BULLISH"
-    )
-
-    bear = sum(
-        1
-        for v in mtf.values()
-        if v == "BEARISH"
-    )
-
-    if bull >= 3:
-        score += 2
-        reasons.append(
-            f"MTF alignment: {bull}/5 bullish"
-        )
-
-    elif bear >= 3:
-        score -= 2
-        reasons.append(
-            f"MTF alignment: {bear}/5 bearish"
-        )
-
-    if structure["state"] == "BULLISH":
-
-        score += 2
-
-        reasons.append(
-            f"Bullish {structure['event']}"
-            if structure["event"]
-            else
-            "Bullish market structure"
-        )
-
-    elif structure["state"] == "BEARISH":
-
-        score -= 2
-
-        reasons.append(
-            f"Bearish {structure['event']}"
-            if structure["event"]
-            else
-            "Bearish market structure"
-        )
-
-    for ev in liq_events:
-
-        if ev["type"] == "SELL_SIDE_SWEEP":
-
-            score += 2
-
-            reasons.append(
-                "Sell-side liquidity swept"
-            )
-
-        elif ev["type"] == "BUY_SIDE_SWEEP":
-
-            score -= 2
-
-            reasons.append(
-                "Buy-side liquidity swept"
-            )
-
+    mss = mss or {"direction": "NONE"}
+    sr_levels = sr_levels or []
     chart_patterns = chart_patterns or []
 
-    bullish_patterns = [
-        p
-        for p in chart_patterns
-        if p.get("direction") == "bullish"
-        and p.get("confirmed") is True
-    ]
+    # Each SMC strategy is evaluated independently. Violated zones are not
+    # votes for the opposite side; they are simply removed from consideration.
+    bullish_setups = []
+    bearish_setups = []
 
-    bearish_patterns = [
-        p
-        for p in chart_patterns
-        if p.get("direction") == "bearish"
-        and p.get("confirmed") is True
-    ]
+    if structure.get("state") == "BULLISH":
+        bullish_setups.append("BOS/CHoCH")
+    elif structure.get("state") == "BEARISH":
+        bearish_setups.append("BOS/CHoCH")
 
+    for ev in liq_events:
+        if ev["type"] == "SELL_SIDE_SWEEP":
+            bullish_setups.append("Liquidity Sweep")
+            reasons.append("Sell-side liquidity swept")
+        elif ev["type"] == "BUY_SIDE_SWEEP":
+            bearish_setups.append("Liquidity Sweep")
+            reasons.append("Buy-side liquidity swept")
+
+    bullish_zones = [z for z in fvg_zones + ob_zones if z.get("direction") == "bullish" and z.get("status") == "respected" and z.get("confirmed")]
+    bearish_zones = [z for z in fvg_zones + ob_zones if z.get("direction") == "bearish" and z.get("status") == "respected" and z.get("confirmed")]
+    if bullish_zones:
+        bullish_setups.extend(["FVG/OB"] * len(bullish_zones))
+        reasons.append(f"{len(bullish_zones)} respected bullish FVG/OB setup(s)")
+    if bearish_zones:
+        bearish_setups.extend(["FVG/OB"] * len(bearish_zones))
+        reasons.append(f"{len(bearish_zones)} respected bearish FVG/OB setup(s)")
+
+    if mss.get("direction") == "bullish":
+        bullish_setups.append("MSS")
+        reasons.append("Bullish MSS with displacement")
+    elif mss.get("direction") == "bearish":
+        bearish_setups.append("MSS")
+        reasons.append("Bearish MSS with displacement")
+
+    confirmed_sr_bull = [s for s in sr_levels if s.get("status") == "CONFIRMED" and s.get("direction") == "bullish"]
+    confirmed_sr_bear = [s for s in sr_levels if s.get("status") == "CONFIRMED" and s.get("direction") == "bearish"]
+    if confirmed_sr_bull:
+        bullish_setups.extend(["Support/Resistance"] * len(confirmed_sr_bull))
+        reasons.append("Confirmed bullish S/R flip")
+    if confirmed_sr_bear:
+        bearish_setups.extend(["Support/Resistance"] * len(confirmed_sr_bear))
+        reasons.append("Confirmed bearish S/R flip")
+
+    bullish_patterns = [p for p in chart_patterns if p.get("direction") == "bullish" and p.get("confirmed") is True]
+    bearish_patterns = [p for p in chart_patterns if p.get("direction") == "bearish" and p.get("confirmed") is True]
+
+    # MTF and existing chart patterns remain contextual evidence, not required
+    # gates for an independent SMC setup.
+    bull_mtf = sum(1 for v in mtf.values() if v == "BULLISH")
+    bear_mtf = sum(1 for v in mtf.values() if v == "BEARISH")
+    if bull_mtf >= 3:
+        reasons.append(f"MTF alignment: {bull_mtf}/6 bullish")
+    elif bear_mtf >= 3:
+        reasons.append(f"MTF alignment: {bear_mtf}/6 bearish")
     if bullish_patterns and not bearish_patterns:
-
-        score += 2
-
-        names = ", ".join(
-            p["name"]
-            for p in bullish_patterns[:2]
-        )
-
-        reasons.append(
-            f"Confirmed bullish chart pattern: {names}"
-        )
-
+        reasons.append("Confirmed bullish chart pattern")
     elif bearish_patterns and not bullish_patterns:
-
-        score -= 2
-
-        names = ", ".join(
-            p["name"]
-            for p in bearish_patterns[:2]
-        )
-
-        reasons.append(
-            f"Confirmed bearish chart pattern: {names}"
-        )
-
+        reasons.append("Confirmed bearish chart pattern")
     elif bullish_patterns and bearish_patterns:
+        reasons.append("Mixed confirmed chart-pattern signals")
 
-        reasons.append(
-            "Mixed confirmed chart-pattern signals"
-        )
+    bull_count = len(bullish_setups)
+    bear_count = len(bearish_setups)
 
-    # --------------------------------------------------------
-    # FVG signal-context validation.
-    # FVGs remain independent from OBs and are used here only
-    # as directional context for the final signal.
-    # --------------------------------------------------------
+    # Confirmation/respect is evaluated before raw count. Once invalidated
+    # setups are removed, the remaining confirmed side can signal by itself.
+    if bull_count > 0 and bear_count == 0:
+        direction = "BUY"
+    elif bear_count > 0 and bull_count == 0:
+        direction = "SELL"
+    elif bull_count > bear_count:
+        direction = "BUY"
+    elif bear_count > bull_count:
+        direction = "SELL"
+    else:
+        direction = "WAIT"
 
-    bullish_fvg_conflict = any(
-        zone.get("direction") == "bullish"
-        and
-        zone.get("bottom") is not None
-        and
-        zone.get("top") is not None
-        and
-        zone["bottom"] <= price <= zone["top"]
-        for zone in fvg_zones
-    )
+    # Context can increase strength, but cannot overturn a confirmed SMC side.
+    confluence = max(bull_count, bear_count)
+    aligned_context = (direction == "BUY" and bull_mtf >= 3) or (direction == "SELL" and bear_mtf >= 3)
+    strong = confluence >= 2 or (confluence >= 1 and aligned_context)
 
-    bearish_fvg_conflict = any(
-        zone.get("direction") == "bearish"
-        and
-        zone.get("bottom") is not None
-        and
-        zone.get("top") is not None
-        and
-        zone["bottom"] <= price <= zone["top"]
-        for zone in fvg_zones
-    )
-
-    if score >= 6:
-        sig = "STRONG BUY"
-
-    elif score >= 3:
-        sig = "BUY"
-
-    elif score <= -6:
-        sig = "STRONG SELL"
-
-    elif score <= -3:
-        sig = "SELL"
-
+    if direction == "BUY":
+        sig = "STRONG BUY" if strong else "BUY"
+    elif direction == "SELL":
+        sig = "STRONG SELL" if strong else "SELL"
     else:
         sig = "WAIT"
 
-    if sig in {"BUY", "STRONG BUY"} and bearish_fvg_conflict:
-        sig = "WAIT"
-        reasons.append(
-            "Bullish signal blocked by active bearish FVG at current price"
-        )
+    # Keep a numerical score for the existing API, now representing the
+    # independent confirmed SMC setup balance rather than a hidden gate.
+    score = (bull_count - bear_count) * 3
+    if aligned_context and direction != "WAIT":
+        score += 1 if direction == "BUY" else -1
 
-    elif sig in {"SELL", "STRONG SELL"} and bullish_fvg_conflict:
-        sig = "WAIT"
-        reasons.append(
-            "Bearish signal blocked by active bullish FVG at current price"
-        )
-
-    atr = calculate_atr(
-        candles
-    ) or max(
-        price * 0.001,
-        0.10
-    )
-
+    atr = calculate_atr(candles) or max(price * 0.001, 0.10)
     return {
         "signal": sig,
         "score": score,
-        "confidence": round(
-            clamp(
-                50 + abs(score) * 5,
-                50,
-                95
-            )
-        ),
+        "confidence": round(clamp(50 + min(45, abs(score) * 5), 50, 95)),
         "rsi": rsi,
         "reasons": reasons,
-        "bullish_mtf": bull,
-        "bearish_mtf": bear,
-        "atr": round(
-            atr,
-            4
-        ),
-        "confirmed_patterns": [
-            p["name"]
-            for p in chart_patterns
-        ]
+        "bullish_mtf": bull_mtf,
+        "bearish_mtf": bear_mtf,
+        "atr": round(atr, 4),
+        "confirmed_patterns": [p["name"] for p in chart_patterns],
+        "bullish_setups": bullish_setups,
+        "bearish_setups": bearish_setups
     }
+
 
 
 def smc_analysis(interval="5m"):
@@ -2861,14 +3220,17 @@ def smc_analysis(interval="5m"):
     # Copy static candles before live data is applied.
     # --------------------------------------------------------
 
-    static_candles = [
-        dict(c)
-        for c in get_gold(interval)
-    ]
-
     live_candles = [
         dict(c)
         for c in get_gold_with_live(interval)
+    ]
+
+    # get_gold_with_live() uses the same Yahoo candle stream as
+    # get_gold(). Keep the two existing variables/roles, but avoid
+    # requesting the exact same cached candle data twice.
+    static_candles = [
+        dict(c)
+        for c in live_candles
     ]
 
     smc_candles = live_candles
@@ -2960,16 +3322,20 @@ def smc_analysis(interval="5m"):
         smc_candles
     )
 
-    # FVG engine is independent. OBs may use these validated FVGs
-    # as confirmation without owning or mutating their lifecycle.
     fvg_zones = detect_fvgs(
-        smc_candles,
-        preserve_metadata=True
+        smc_candles
     )
 
     ob_zones = detect_order_blocks(
-        smc_candles,
-        fvg_zones
+        smc_candles
+    )
+
+    mss = detect_mss(
+        smc_candles
+    )
+
+    sr_levels = detect_support_resistance(
+        smc_candles
     )
 
     pd = calculate_pd(
@@ -2993,7 +3359,9 @@ def smc_analysis(interval="5m"):
         fvg_zones,
         ob_zones,
         pd,
-        chart_patterns
+        chart_patterns,
+        mss,
+        sr_levels
     )
 
     lines = []
@@ -3020,6 +3388,16 @@ def smc_analysis(interval="5m"):
     lines.extend(
         liq_lines
     )
+
+    for sr in sr_levels:
+        lines.append({
+            "price": sr["price"],
+            "color": "#00ff88" if sr["direction"] == "bullish" else "#ff4444",
+            "title": sr["label"],
+            "lineStyle": 0,
+            "layer": "structure",
+            "active": True
+        })
 
     zones = []
 
@@ -3050,6 +3428,25 @@ def smc_analysis(interval="5m"):
             "label": ev["label"],
             "type": "LIQUIDITY"
         })
+
+    if mss.get("direction") != "NONE":
+        markers.append({
+            "time": smc_candles[-1]["time"],
+            "label": mss["state"],
+            "type": "MSS",
+            "direction": mss["direction"],
+            "price": mss.get("level")
+        })
+
+    for sr in sr_levels:
+        if sr.get("status") in {"BROKEN", "CONFIRMED"}:
+            markers.append({
+                "time": smc_candles[-1]["time"],
+                "label": sr["label"],
+                "type": "SUPPORT_RESISTANCE",
+                "direction": sr.get("direction"),
+                "price": sr.get("price")
+            })
 
     # Existing chart pattern markers preserved.
     pattern_markers = build_pattern_markers(
@@ -3109,6 +3506,16 @@ def smc_analysis(interval="5m"):
                 signal,
                 signal_candle
             )
+
+    commentary = build_smc_commentary(
+        structure,
+        mss,
+        liq_events,
+        fvg_zones,
+        ob_zones,
+        sr_levels,
+        signal_data
+    )
 
     # ========================================================
     # HISTORICAL SMC SIGNALS
@@ -3181,6 +3588,8 @@ def smc_analysis(interval="5m"):
         "lines": lines,
         "zones": zones,
 
+        "fvg_zones": fvg_zones,
+        "ob_zones": ob_zones,
         "patterns": chart_patterns,
 
         "pattern_confirmation":
@@ -3191,6 +3600,10 @@ def smc_analysis(interval="5m"):
 
         "mtf_matrix": mtf,
         "pd_zones": pd,
+
+        "mss": mss,
+        "support_resistance": sr_levels,
+        "smc_commentary": commentary,
 
         "atr": signal_data["atr"],
 
@@ -5312,14 +5725,14 @@ def api_news():
             data = r.json()
             high = []
 
-            for ev in data[:20]:
+            for ev in data:
 
                 if (
-                    ev.get("impact")
+                    str(ev.get("impact", "")).strip().lower()
                     ==
-                    "High"
+                    "high"
                     and
-                    ev.get("country")
+                    str(ev.get("country", "")).strip().upper()
                     in
                     [
                         "USD",
