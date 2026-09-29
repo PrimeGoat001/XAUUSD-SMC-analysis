@@ -3985,6 +3985,82 @@ def _nm_is_usd_event(event):
     }
 
 
+_CAL_FEED_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+_cal_json_cache = {"data": None, "time": 0}
+_cal_fail_until = 0
+_cal_fetch_lock = threading.Lock()
+
+
+def _fetch_calendar_json():
+    """Robust calendar feed fetch shared by the news popup and the
+    News Analysis engine.
+
+    - 6s timeout, one retry
+    - reuses a fresh result for 30s
+    - after a failure, backs off for 60s instead of retrying every call
+    Returns the parsed list, or None when the feed is unavailable.
+    """
+    global _cal_fail_until
+
+    now = time.time()
+
+    if (
+        _cal_json_cache["data"] is not None
+        and now - _cal_json_cache["time"] < 30
+    ):
+        return _cal_json_cache["data"]
+
+    if now < _cal_fail_until:
+        return None
+
+    with _cal_fetch_lock:
+
+        now = time.time()
+
+        if (
+            _cal_json_cache["data"] is not None
+            and now - _cal_json_cache["time"] < 30
+        ):
+            return _cal_json_cache["data"]
+
+        for attempt in range(2):
+
+            try:
+
+                response = SESSION.get(
+                    _CAL_FEED_URL,
+                    timeout=6
+                )
+
+                if response.status_code == 200:
+
+                    data = response.json()
+
+                    if isinstance(data, list):
+
+                        _cal_json_cache["data"] = data
+                        _cal_json_cache["time"] = time.time()
+
+                        return data
+
+                print(
+                    f"[NEWS FEED] HTTP {response.status_code} (attempt {attempt + 1})"
+                )
+
+            except Exception as exc:
+
+                print(
+                    f"[NEWS FEED] {exc} (attempt {attempt + 1})"
+                )
+
+            if attempt == 0:
+                time.sleep(0.5)
+
+        _cal_fail_until = time.time() + 60
+
+        return None
+
+
 def _nm_get_calendar():
     global _nm_last_calendar
     global _nm_calendar_time
@@ -4005,17 +4081,21 @@ def _nm_get_calendar():
 
     try:
 
-        response = SESSION.get(
-            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
-            timeout=5
-        )
+        data = _fetch_calendar_json()
 
-        if response.status_code != 200:
+        if data is None:
+
+            # Feed unavailable: keep the last good list and retry
+            # in about 60s instead of on every call.
+            with _nm_lock:
+                _nm_calendar_time = (
+                    now - NM_CALENDAR_REFRESH + 60
+                )
+
             return list(
                 _nm_last_calendar
             )
 
-        data = response.json()
         events = []
 
         for raw in data:
@@ -5833,14 +5913,10 @@ def api_news():
 
     try:
 
-        r = SESSION.get(
-            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
-            timeout=2
-        )
+        data = _fetch_calendar_json()
 
-        if r.status_code == 200:
+        if data is not None:
 
-            data = r.json()
             high = []
 
             for ev in data:
@@ -5887,9 +5963,18 @@ def api_news():
             f"[NEWS] {e}"
         )
 
-    return jsonify(
-        _news_cache["data"]
-    )
+    # Feed failed: keep serving the last good list and retry in ~60s.
+    _news_cache["time"] = now - 300 + 60
+
+    if _news_cache["data"]:
+
+        return jsonify(
+            _news_cache["data"]
+        )
+
+    # Never had a good result: report failure (HTTP 503) so the page
+    # shows "News feed unavailable" instead of "No news".
+    return jsonify([]), 503
 
 
 @app.route("/")
@@ -5938,6 +6023,27 @@ def api_price():
         "tf",
         "5m"
     )
+
+    # Live tick comes from the live spot feed (cached ~0.8s inside
+    # get_oanda_live) so it does not depend on Yahoo candle updates.
+    # If the live feed is unavailable or stale (>15s), fall back to the
+    # previous behaviour: the latest candle close.
+    live = get_oanda_live()
+
+    live_is_fresh = (
+        live
+        and live > 1000
+        and (time.time() - _last_live_fetch) < 15
+    )
+
+    if live_is_fresh:
+
+        return jsonify({
+            "price": round(live, 2),
+            "market_open": is_market_open(),
+            "timestamp": now_utc_iso(),
+            "offset": PRICE_OFFSET
+        })
 
     candles = get_gold_with_live(
         tf
