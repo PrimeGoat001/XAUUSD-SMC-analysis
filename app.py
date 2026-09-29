@@ -3783,6 +3783,11 @@ NM_EVENT_AFTER_MINUTES = 30
 NM_CELEBRATION_START = 10
 NM_CELEBRATION_END = 20
 NM_CALENDAR_REFRESH = 300
+
+# Prediction / scoring tuning
+NM_HIST_MIN_SAMPLE = 3      # need at least this many past matches to use history
+NM_HIST_FULL_SAMPLE = 5     # history reaches full weight at this many matches
+NM_MIN_MOVE = 0.50          # smaller 30m moves than this are UNRESOLVED (noise)
 NM_RESEARCH_REFRESH = 180
 
 _nm_last_calendar = []
@@ -3986,32 +3991,67 @@ def _nm_is_usd_event(event):
 
 
 _CAL_FEED_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+_CAL_CACHE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "calendar_cache.json"
+)
+_CAL_FRESH_SECONDS = 600
 _cal_json_cache = {"data": None, "time": 0}
 _cal_fail_until = 0
 _cal_fetch_lock = threading.Lock()
+
+
+def _cal_load_disk():
+    """Load the last good calendar saved on disk (survives restarts)."""
+    try:
+        with open(_CAL_CACHE_FILE, "r", encoding="utf-8") as fh:
+            saved = _nm_json.load(fh)
+        if isinstance(saved.get("data"), list):
+            return saved["data"], float(saved.get("time", 0))
+    except Exception:
+        pass
+    return None, 0
+
+
+def _cal_save_disk(data):
+    try:
+        with open(_CAL_CACHE_FILE, "w", encoding="utf-8") as fh:
+            _nm_json.dump({"data": data, "time": time.time()}, fh)
+    except Exception:
+        pass
 
 
 def _fetch_calendar_json():
     """Robust calendar feed fetch shared by the news popup and the
     News Analysis engine.
 
-    - 6s timeout, one retry
-    - reuses a fresh result for 30s
-    - after a failure, backs off for 60s instead of retrying every call
-    Returns the parsed list, or None when the feed is unavailable.
+    - uses a FRESH connection (not the shared SESSION) to avoid SSL
+      "bad record mac" errors from reused/shared connections
+    - a good result is reused for 10 minutes and saved to disk
+    - HTTP 429 (rate limit) is NOT retried; backs off 5 minutes
+    - other failures retry once, then back off 60s
+    - when the feed fails, the last good list (memory or disk) is
+      returned so the site keeps showing news
+    Returns the parsed list, or None only if no good list ever existed.
     """
     global _cal_fail_until
 
     now = time.time()
 
+    if _cal_json_cache["data"] is None:
+        disk_data, disk_time = _cal_load_disk()
+        if disk_data is not None:
+            _cal_json_cache["data"] = disk_data
+            _cal_json_cache["time"] = disk_time
+
     if (
         _cal_json_cache["data"] is not None
-        and now - _cal_json_cache["time"] < 30
+        and now - _cal_json_cache["time"] < _CAL_FRESH_SECONDS
     ):
         return _cal_json_cache["data"]
 
     if now < _cal_fail_until:
-        return None
+        return _cal_json_cache["data"]
 
     with _cal_fetch_lock:
 
@@ -4019,17 +4059,23 @@ def _fetch_calendar_json():
 
         if (
             _cal_json_cache["data"] is not None
-            and now - _cal_json_cache["time"] < 30
+            and now - _cal_json_cache["time"] < _CAL_FRESH_SECONDS
         ):
             return _cal_json_cache["data"]
+
+        if now < _cal_fail_until:
+            return _cal_json_cache["data"]
+
+        backoff = 60
 
         for attempt in range(2):
 
             try:
 
-                response = SESSION.get(
+                response = requests.get(
                     _CAL_FEED_URL,
-                    timeout=6
+                    headers=HEADERS,
+                    timeout=8
                 )
 
                 if response.status_code == 200:
@@ -4040,12 +4086,30 @@ def _fetch_calendar_json():
 
                         _cal_json_cache["data"] = data
                         _cal_json_cache["time"] = time.time()
+                        _cal_save_disk(data)
 
                         return data
 
                 print(
                     f"[NEWS FEED] HTTP {response.status_code} (attempt {attempt + 1})"
                 )
+
+                if response.status_code == 429:
+
+                    backoff = 300
+
+                    try:
+                        backoff = min(
+                            max(
+                                int(response.headers.get("Retry-After", 300)),
+                                60
+                            ),
+                            900
+                        )
+                    except Exception:
+                        backoff = 300
+
+                    break
 
             except Exception as exc:
 
@@ -4054,11 +4118,11 @@ def _fetch_calendar_json():
                 )
 
             if attempt == 0:
-                time.sleep(0.5)
+                time.sleep(1.0)
 
-        _cal_fail_until = time.time() + 60
+        _cal_fail_until = time.time() + backoff
 
-        return None
+        return _cal_json_cache["data"]
 
 
 def _nm_get_calendar():
@@ -4897,11 +4961,23 @@ def _nm_make_prediction(event):
     sell_score = 0.0
     reasons = []
 
-    if historical["direction"] == "BUY":
+    # History is only used with enough past matches, and its weight
+    # scales up with the sample size (full weight at NM_HIST_FULL_SAMPLE).
+    hist_used = (
+        historical["sample"] >= NM_HIST_MIN_SAMPLE
+    )
+
+    hist_scale = min(
+        historical["sample"] / NM_HIST_FULL_SAMPLE,
+        1.0
+    )
+
+    if hist_used and historical["direction"] == "BUY":
 
         weight = (
             4.0 *
-            historical["strength"]
+            historical["strength"] *
+            hist_scale
         )
 
         buy_score += weight
@@ -4911,11 +4987,12 @@ def _nm_make_prediction(event):
             f"{historical['sample']} matches favour BUY"
         )
 
-    elif historical["direction"] == "SELL":
+    elif hist_used and historical["direction"] == "SELL":
 
         weight = (
             4.0 *
-            historical["strength"]
+            historical["strength"] *
+            hist_scale
         )
 
         sell_score += weight
@@ -5120,7 +5197,7 @@ def _nm_make_prediction(event):
 
     evidence_count = sum([
         1
-        if historical["sample"] > 0
+        if hist_used
         else 0,
 
         1
@@ -5386,27 +5463,35 @@ def _nm_capture_outcomes():
             after_15 = None
             after_30 = None
 
+            # Candle "time" is the candle OPEN time (5m candles). Use
+            # each candle's CLOSE time so the baseline is the price at
+            # the release, and the "after" prices are the prices 5 / 15
+            # / 30 minutes after it.
             for candle in candles:
 
                 t = candle["time"]
+                candle_close_time = t + 5 * 60
 
-                if t <= event_ts:
+                if candle_close_time <= event_ts:
                     before = candle["close"]
 
                 if (
-                    event_ts < t
+                    t >= event_ts
+                    and candle_close_time
                     <= event_ts + 5 * 60
                 ):
                     after_5 = candle["close"]
 
                 if (
-                    event_ts < t
+                    t >= event_ts
+                    and candle_close_time
                     <= event_ts + 15 * 60
                 ):
                     after_15 = candle["close"]
 
                 if (
-                    event_ts < t
+                    t >= event_ts
+                    and candle_close_time
                     <= event_ts + 30 * 60
                 ):
                     after_30 = candle["close"]
@@ -5422,14 +5507,15 @@ def _nm_capture_outcomes():
                 row["prediction"]
             ).upper()
 
-            if after_30 > before:
+            if abs(after_30 - before) < NM_MIN_MOVE:
+                # Move too small to be a real reaction: not scored.
+                actual_direction = None
+
+            elif after_30 > before:
                 actual_direction = "BUY"
 
-            elif after_30 < before:
-                actual_direction = "SELL"
-
             else:
-                actual_direction = None
+                actual_direction = "SELL"
 
             if actual_direction == prediction:
 
