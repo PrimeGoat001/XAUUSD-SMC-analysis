@@ -1246,14 +1246,16 @@ def detect_liquidity(
 def _zone_state(zone, candles):
     """Evaluate a zone using the agreed two-candle violation rule.
 
-    A wick through a boundary is not enough to invalidate a zone.
-    The first body close beyond the invalidation boundary is a
-    potential violation. A second consecutive close beyond that
-    boundary confirms the violation. If the next candle reclaims
-    the zone, the zone remains valid/respected.
+    - A wick through the zone is NOT a violation. If the candle closes back
+      inside the zone (or on the valid side) the setup is valid/respected.
+    - A candle that closes beyond the invalidation boundary is only a
+      POTENTIAL violation. The next candle decides:
+          closes beyond again -> zone violated
+          closes back in/valid side -> zone stays valid
+    - A candle that closes inside the zone is valid.
     """
     if not candles:
-        return {"status": "invalid", "confirmed": False, "retested": False, "respected": False}
+        return {"status": "invalid", "confirmed": False, "retested": False, "respected": False, "swept": False}
 
     top = safe_float(zone.get("top"), None)
     bottom = safe_float(zone.get("bottom"), None)
@@ -1261,16 +1263,16 @@ def _zone_state(zone, candles):
     created_time = zone.get("createdTime")
 
     if top is None or bottom is None or created_time is None:
-        return {"status": "invalid", "confirmed": False, "retested": False, "respected": False}
+        return {"status": "invalid", "confirmed": False, "retested": False, "respected": False, "swept": False}
 
     post = [c for c in candles if c.get("time", 0) > created_time]
     if not post:
-        return {"status": "valid", "confirmed": False, "retested": False, "respected": False}
+        return {"status": "valid", "confirmed": False, "retested": False, "respected": False, "swept": False}
 
-    moved_away = False
     retested = False
     respected = False
     potential = False
+    swept = False
 
     for idx, candle in enumerate(post):
         close = safe_float(candle.get("close"), None)
@@ -1280,25 +1282,24 @@ def _zone_state(zone, candles):
             continue
 
         if direction == "bullish":
-            if close > top:
-                moved_away = True
             touched = low <= top and high >= bottom
             potential_break = close < bottom
+            wick_past = low < bottom and close >= bottom
         elif direction == "bearish":
-            if close < bottom:
-                moved_away = True
             touched = high >= bottom and low <= top
             potential_break = close > top
+            wick_past = high > top and close <= top
         else:
-            return {"status": "invalid", "confirmed": False, "retested": False, "respected": False}
+            return {"status": "invalid", "confirmed": False, "retested": False, "respected": False, "swept": False}
 
-        if moved_away and touched:
+        if touched:
             retested = True
-            # A touch/retest that closes back on the valid side is a respect.
-            if direction == "bullish" and close >= bottom:
+            # Close inside the zone, or a wick past the zone that closes back
+            # on the valid side, keeps the setup valid.
+            if not potential_break:
                 respected = True
-            elif direction == "bearish" and close <= top:
-                respected = True
+            if wick_past:
+                swept = True
 
         if potential_break:
             potential = True
@@ -1308,22 +1309,28 @@ def _zone_state(zone, candles):
                 if next_close is not None:
                     if direction == "bullish":
                         if next_close < bottom:
-                            return {"status": "violated", "confirmed": True, "retested": retested, "respected": respected}
-                        if next_close >= bottom:
-                            respected = True
-                            potential = False
+                            return {"status": "violated", "confirmed": True, "retested": retested,
+                                    "respected": respected, "swept": swept,
+                                    "violated_time": post[idx + 1].get("time")}
+                        respected = True
+                        retested = True
+                        potential = False
                     else:
                         if next_close > top:
-                            return {"status": "violated", "confirmed": True, "retested": retested, "respected": respected}
-                        if next_close <= top:
-                            respected = True
-                            potential = False
+                            return {"status": "violated", "confirmed": True, "retested": retested,
+                                    "respected": respected, "swept": swept,
+                                    "violated_time": post[idx + 1].get("time")}
+                        respected = True
+                        retested = True
+                        potential = False
 
-    if retested and respected:
-        return {"status": "respected", "confirmed": True, "retested": True, "respected": True}
+    # First close beyond the zone on the newest candle: wait for the next one.
     if potential:
-        return {"status": "potential_violation", "confirmed": False, "retested": retested, "respected": respected}
-    return {"status": "valid", "confirmed": False, "retested": retested, "respected": respected}
+        return {"status": "potential_violation", "confirmed": False, "retested": retested,
+                "respected": respected, "swept": swept}
+    if retested and respected:
+        return {"status": "respected", "confirmed": True, "retested": True, "respected": True, "swept": swept}
+    return {"status": "valid", "confirmed": False, "retested": retested, "respected": respected, "swept": swept}
 
 
 def is_zone_violated(zone, candles, created_index=None, confirm_bars=2):
@@ -1346,6 +1353,7 @@ def _add_zone_state(zone, candles):
     zone["confirmed"] = bool(state["confirmed"])
     zone["retested"] = bool(state["retested"])
     zone["respected"] = bool(state["respected"])
+    zone["swept"] = bool(state.get("swept"))
     zone["valid"] = state["status"] != "violated"
     return zone
 
@@ -1445,60 +1453,18 @@ def is_fvg_filled(
     zone,
     candles
 ):
-    if not candles:
-        return True
-
-    created_time = zone.get(
-        "createdTime"
-    )
-
-    top = safe_float(
-        zone.get("top"),
-        None
-    )
-
-    bottom = safe_float(
-        zone.get("bottom"),
-        None
-    )
-
-    direction = str(
-        zone.get(
-            "direction",
-            ""
-        )
-    ).lower()
-
-    if (
-        created_time is None
-        or
-        top is None
-        or
-        bottom is None
-    ):
-        return True
-
-    for candle in candles:
-
-        if candle.get("time") <= created_time:
-            continue
-
-        if direction == "bullish":
-
-            if candle["low"] <= bottom:
-                return True
-
-        elif direction == "bearish":
-
-            if candle["high"] >= top:
-                return True
-
-    return False
+    # A wick through the zone does not fill/invalidate it. Only the
+    # two-candle close-beyond rule does.
+    return _zone_state(
+        zone,
+        candles
+    ).get("status") in {"violated", "invalid"}
 
 
 def detect_fvgs(
     candles,
-    max_zones=6
+    max_zones=6,
+    violated_out=None
 ):
     active = []
 
@@ -1588,23 +1554,32 @@ def detect_fvgs(
 
     for zone in cands:
 
-        if is_fvg_filled(
+        _state = _zone_state(
             zone,
             candles
-        ):
-            continue
+        )
 
-        if is_zone_violated(
-            zone,
-            candles,
-            zone["createdIndex"],
-            3
-        ):
+        if _state.get("status") in {"violated", "invalid"}:
+
+            if (
+                violated_out is not None
+                and _state.get("status") == "violated"
+            ):
+                _v = dict(zone)
+                _v["violatedTime"] = _state.get("violated_time")
+                _v.pop("createdIndex", None)
+                violated_out.append(_v)
+
             continue
 
         zone.pop(
             "createdIndex",
             None
+        )
+
+        _add_zone_state(
+            zone,
+            candles
         )
 
         active.append(zone)
@@ -1614,7 +1589,8 @@ def detect_fvgs(
 
 def detect_order_blocks(
     candles,
-    max_zones=6
+    max_zones=6,
+    violated_out=None
 ):
     """
     EXISTING ORDER BLOCK METHODOLOGY PRESERVED.
@@ -1831,22 +1807,37 @@ def detect_order_blocks(
             })
 
     # --------------------------------------------------------
-    # Preserve the existing three-close protection.
+    # Two-candle violation rule + zone lifecycle state.
     # --------------------------------------------------------
 
     for zone in cands:
 
-        if is_zone_violated(
+        _state = _zone_state(
             zone,
-            candles,
-            zone["createdIndex"],
-            3
-        ):
+            candles
+        )
+
+        if _state.get("status") in {"violated", "invalid"}:
+
+            if (
+                violated_out is not None
+                and _state.get("status") == "violated"
+            ):
+                _v = dict(zone)
+                _v["violatedTime"] = _state.get("violated_time")
+                _v.pop("createdIndex", None)
+                violated_out.append(_v)
+
             continue
 
         zone.pop(
             "createdIndex",
             None
+        )
+
+        _add_zone_state(
+            zone,
+            candles
         )
 
         active.append(zone)
@@ -2997,42 +2988,99 @@ def detect_support_resistance(candles, max_levels=4):
     return out
 
 
-def build_smc_commentary(structure, mss, liq_events, fvg_zones, ob_zones, sr_levels, signal_data):
+# Price is "near" a zone when it is within this many ATRs of the zone edge.
+NEAR_ZONE_ATR_MULT = 2.0
+
+
+def _find_near_zone_setup(price, atr, zones):
+    """Find the closest untouched, still-valid zone that price is approaching.
+
+    Bullish zone (demand): price above the zone top, coming down to it -> BUY.
+    Bearish zone (supply): price below the zone bottom, rising to it -> SELL.
+    Returns None when nothing is close enough.
+    """
+    max_dist = max(atr * NEAR_ZONE_ATR_MULT, 0.10)
+    best = None
+
+    for z in zones:
+        if z.get("status") != "valid" or z.get("retested"):
+            continue
+
+        top = safe_float(z.get("top"), None)
+        bottom = safe_float(z.get("bottom"), None)
+        if top is None or bottom is None:
+            continue
+
+        d = str(z.get("direction", "")).lower()
+
+        if d == "bullish" and price > top:
+            dist = price - top
+            direction = "BUY"
+        elif d == "bearish" and price < bottom:
+            dist = bottom - price
+            direction = "SELL"
+        else:
+            continue
+
+        if dist > max_dist:
+            continue
+
+        if best is None or dist < best["distance"]:
+            best = {
+                "direction": direction,
+                "distance": round(dist, 2),
+                "zone": z.get("label") or z.get("type"),
+                "top": top,
+                "bottom": bottom,
+                "zone_direction": d
+            }
+
+    return best
+
+
+def build_smc_commentary(structure, mss, liq_events, fvg_zones, ob_zones, sr_levels, signal_data, violated_zones=None):
     comments=[]
     confirmed=[]
     waits=[]
 
-    for z in fvg_zones:
-        d=z.get("direction")
-        name="bullish FVG" if d=="bullish" else "bearish FVG"
-        if z.get("status")=="respected" and z.get("confirmed"):
-            confirmed.append(name)
-            comments.append(f"{name.upper()} RESPECTED — confirmation present after a retest without a confirmed violation.")
-        elif z.get("status")=="potential_violation":
-            waits.append(name)
-            comments.append(f"WAIT — {name.upper()} HAS A POTENTIAL VIOLATION. Wait for the second candle to confirm a break or reclaim the zone.")
-        elif z.get("retested"):
-            waits.append(name)
-            comments.append(f"WAIT — {name.upper()} RETESTED. It has not yet produced confirmed respect; wait for the zone to hold.")
-        else:
-            waits.append(name)
-            comments.append(f"Wait for price to retest the {name} and respect the zone before considering a {'BUY' if d=='bullish' else 'SELL'} setup.")
+    early = signal_data.get("early_zone") or {}
 
-    for z in ob_zones:
+    def _is_early_zone(z):
+        return (
+            bool(early)
+            and safe_float(z.get("top"), None) == early.get("top")
+            and safe_float(z.get("bottom"), None) == early.get("bottom")
+            and str(z.get("direction", "")).lower() == early.get("zone_direction")
+        )
+
+    for kind, zone_list in (("FVG", fvg_zones), ("OB", ob_zones)):
+        for z in zone_list:
+            d=z.get("direction")
+            name=("bullish " if d=="bullish" else "bearish ")+kind
+            side="BUY" if d=="bullish" else "SELL"
+            if z.get("status")=="respected" and z.get("confirmed"):
+                confirmed.append(name)
+                if z.get("swept"):
+                    comments.append(f"WICK SWEEP — price wicked through the {name.upper()} but the candle closed back on the valid side. Zone remains valid; {side} setup confirmed.")
+                else:
+                    comments.append(f"{name.upper()} CONFIRMED — price closed inside/respected the zone. {side} setup is valid and the signal is issued immediately.")
+            elif z.get("status")=="potential_violation":
+                waits.append(name)
+                comments.append(f"WAIT — a candle closed beyond the {name.upper()}. This is only a first close; wait for the next candle. If it also closes beyond, the zone is violated; if it recovers, the zone stays valid.")
+            elif z.get("retested"):
+                waits.append(name)
+                comments.append(f"WAIT — {name.upper()} has been retested. Wait for a close inside/on the valid side of the zone.")
+            elif _is_early_zone(z):
+                waits.append(name)
+                comments.append(f"EARLY {side} — price is approaching the {name.upper()} ({early.get('distance')} away). Setup is not confirmed yet, so this is a plain {side} only (no STRONG signal) — higher risk.")
+            else:
+                waits.append(name)
+                comments.append(f"Wait for price to reach the {name} and close inside it before considering a {side} setup.")
+
+    for z in (violated_zones or []):
         d=z.get("direction")
-        name="bullish OB" if d=="bullish" else "bearish OB"
-        if z.get("status")=="respected" and z.get("confirmed"):
-            confirmed.append(name)
-            comments.append(f"{name.upper()} RESPECTED — confirmation present after a retest without a confirmed violation.")
-        elif z.get("status")=="potential_violation":
-            waits.append(name)
-            comments.append(f"WAIT — {name.upper()} HAS A POTENTIAL VIOLATION. Wait for the second candle to confirm or reclaim the zone.")
-        elif z.get("retested"):
-            waits.append(name)
-            comments.append(f"WAIT — {name.upper()} RETESTED. Wait for price to hold the zone before considering a setup.")
-        else:
-            waits.append(name)
-            comments.append(f"Wait for price to retest the {name} without violating the zone before considering a {'BUY' if d=='bullish' else 'SELL'} setup.")
+        name=("bullish " if d=="bullish" else "bearish ")+("OB" if z.get("layer")=="ob" else "FVG")
+        comments.append(f"ZONE VIOLATED — two consecutive closes beyond the {name.upper()}. The zone is invalid and no longer supports a {'BUY' if d=='bullish' else 'SELL'} setup.")
 
     for s in sr_levels:
         if s.get("status")=="CONFIRMED":
@@ -3069,10 +3117,13 @@ def build_smc_commentary(structure, mss, liq_events, fvg_zones, ob_zones, sr_lev
     else:
         comments.append("CONFLUENCE: no independently confirmed SMC setup is currently present; WAIT for the relevant setup to be respected/confirmed.")
 
-    if signal_data.get("signal") in {"BUY","STRONG BUY"}:
-        comments.append("STRONG BUY SETUP CONFIRMED. Independent bullish SMC evidence is currently respected/confirmed.")
-    elif signal_data.get("signal") in {"SELL","STRONG SELL"}:
-        comments.append("STRONG SELL SETUP CONFIRMED. Independent bearish SMC evidence is currently respected/confirmed.")
+    sig_now = signal_data.get("signal")
+    if signal_data.get("early") and sig_now in {"BUY","SELL"}:
+        comments.append(f"EARLY {sig_now} — price is near a valid zone. Signal plotted as a plain {sig_now} because the setup is not confirmed yet (risky).")
+    elif sig_now in {"BUY","STRONG BUY"}:
+        comments.append(f"{sig_now} SETUP CONFIRMED. Independent bullish SMC evidence is currently respected/confirmed.")
+    elif sig_now in {"SELL","STRONG SELL"}:
+        comments.append(f"{sig_now} SETUP CONFIRMED. Independent bearish SMC evidence is currently respected/confirmed.")
     else:
         comments.append("WAIT — no independently confirmed directional SMC setup currently meets the confirmation requirements.")
 
@@ -3176,10 +3227,25 @@ def build_signal(
     else:
         direction = "WAIT"
 
+    # Early signal: no confirmed side yet, but price is approaching a valid
+    # untouched FVG/OB. Plain BUY/SELL only - never STRONG (risky setup).
+    early_zone = None
+    if direction == "WAIT":
+        _near_atr = calculate_atr(candles) or max(price * 0.001, 0.10)
+        early_zone = _find_near_zone_setup(price, _near_atr, fvg_zones + ob_zones)
+        if early_zone:
+            direction = early_zone["direction"]
+            reasons.append(
+                f"Early {direction}: price approaching {early_zone['zone']} ({early_zone['distance']} away)"
+            )
+
     # Context can increase strength, but cannot overturn a confirmed SMC side.
     confluence = max(bull_count, bear_count)
     aligned_context = (direction == "BUY" and bull_mtf >= 3) or (direction == "SELL" and bear_mtf >= 3)
     strong = confluence >= 2 or (confluence >= 1 and aligned_context)
+
+    if early_zone:
+        strong = False
 
     if direction == "BUY":
         sig = "STRONG BUY" if strong else "BUY"
@@ -3206,7 +3272,9 @@ def build_signal(
         "atr": round(atr, 4),
         "confirmed_patterns": [p["name"] for p in chart_patterns],
         "bullish_setups": bullish_setups,
-        "bearish_setups": bearish_setups
+        "bearish_setups": bearish_setups,
+        "early": bool(early_zone),
+        "early_zone": early_zone
     }
 
 
@@ -3322,12 +3390,16 @@ def smc_analysis(interval="5m"):
         smc_candles
     )
 
+    violated_zones = []
+
     fvg_zones = detect_fvgs(
-        smc_candles
+        smc_candles,
+        violated_out=violated_zones
     )
 
     ob_zones = detect_order_blocks(
-        smc_candles
+        smc_candles,
+        violated_out=violated_zones
     )
 
     mss = detect_mss(
@@ -3507,6 +3579,17 @@ def smc_analysis(interval="5m"):
                 signal_candle
             )
 
+    # Only report zone violations from the last 10 candles.
+    _recent_cut = smc_candles[-10]["time"]
+
+    recent_violated = sorted(
+        [
+            z for z in violated_zones
+            if (z.get("violatedTime") or 0) >= _recent_cut
+        ],
+        key=lambda z: z.get("violatedTime") or 0
+    )[-2:]
+
     commentary = build_smc_commentary(
         structure,
         mss,
@@ -3514,7 +3597,8 @@ def smc_analysis(interval="5m"):
         fvg_zones,
         ob_zones,
         sr_levels,
-        signal_data
+        signal_data,
+        recent_violated
     )
 
     # ========================================================
@@ -3530,6 +3614,25 @@ def smc_analysis(interval="5m"):
     historical = _smc_get_historical_signals(
         interval
     )
+
+    # ========================================================
+    # FIXED SIGNAL CARD
+    # ========================================================
+    #
+    # The signal and entry shown in the signal card stay locked to
+    # the last accepted signal until an opposite signal is accepted.
+    # ========================================================
+
+    _active = historical["active_entry"]
+
+    if _active:
+        fixed_signal = _active["signal"]
+        commentary.append(
+            f"SIGNAL LOCKED — {_active['signal']} entry fixed at {_active['price']}. "
+            f"It will not move with price and stays fixed until an opposite signal is confirmed."
+        )
+    else:
+        fixed_signal = signal_data["signal"]
 
     historical_times = {
         (
@@ -3573,7 +3676,22 @@ def smc_analysis(interval="5m"):
 
         "price": price,
 
-        "signal": signal_data["signal"],
+        # Locked signal (does not follow live price).
+        "signal": fixed_signal,
+        "live_signal": signal_data["signal"],
+        "signal_locked": bool(_active),
+        "entry_price": (
+            _active["price"]
+            if _active
+            else None
+        ),
+        "entry_time": (
+            _active["time"]
+            if _active
+            else None
+        ),
+        "early_signal": signal_data.get("early", False),
+
         "score": signal_data["score"],
         "confidence": signal_data["confidence"],
         "rsi": signal_data["rsi"],
