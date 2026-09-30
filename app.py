@@ -75,7 +75,8 @@ def _smc_record_signal(
     interval,
     direction,
     signal,
-    candle
+    candle,
+    setup_id=None
 ):
     """
     Record an SMC signal only when it is a NEW direction.
@@ -130,6 +131,7 @@ def _smc_record_signal(
                     "SELL": None
                 },
                 "last_direction": None,
+                "last_setup_id": None,
                 "active_entry": None
             }
 
@@ -140,9 +142,10 @@ def _smc_record_signal(
         last_direction = store.get(
             "last_direction"
         )
+        last_setup_id = store.get("last_setup_id")
 
         # ----------------------------------------------------
-        # SAME-DIRECTION PROTECTION
+        # SAME-SETUP PROTECTION
         # ----------------------------------------------------
         #
         # Once BUY has been accepted, another BUY is ignored
@@ -151,7 +154,11 @@ def _smc_record_signal(
         # Likewise for SELL.
         # ----------------------------------------------------
 
-        if last_direction == direction:
+        if last_direction == direction and setup_id and last_setup_id == setup_id:
+            return None
+
+        # Backward-compatible protection when no setup identity is supplied.
+        if last_direction == direction and not setup_id:
             return None
 
         # ----------------------------------------------------
@@ -167,7 +174,8 @@ def _smc_record_signal(
                 2
             ),
             "signal": signal,
-            "direction": direction
+            "direction": direction,
+            "setup_id": setup_id
         }
 
         # ----------------------------------------------------
@@ -218,6 +226,7 @@ def _smc_record_signal(
         )
 
         store["last_direction"] = direction
+        store["last_setup_id"] = setup_id
 
         return dict(marker)
 
@@ -234,6 +243,7 @@ def _smc_get_historical_signals(interval):
                     "SELL": None
                 },
                 "last_direction": None,
+                "last_setup_id": None,
                 "active_entry": None
             }
         )
@@ -1466,124 +1476,101 @@ def detect_fvgs(
     max_zones=6,
     violated_out=None
 ):
-    active = []
+    """Detect only meaningful wick-to-wick three-candle FVGs.
 
-    if len(candles) < 5:
+    Quality is based on gap size relative to ATR, middle-candle displacement,
+    body strength and whether the formation is structurally meaningful. Tiny
+    M1 noise is rejected while the original zone coordinates/lifecycle remain
+    unchanged.
+    """
+    active = []
+    if len(candles) < 7:
         return active
 
     atr = calculate_atr(candles) or 1.0
-
-    min_gap = atr * 0.10
-
-    start = max(
-        2,
-        len(candles) - 80
-    )
-
+    start = max(2, len(candles) - 100)
     cands = []
 
-    for i in range(
-        start,
-        len(candles)
-    ):
+    recent_ranges = [max(c["high"] - c["low"], 0.0) for c in candles[-30:]]
+    avg_range = sum(recent_ranges) / max(1, len(recent_ranges))
 
-        left = candles[i - 2]
-        right = candles[i]
+    for i in range(start, len(candles)):
+        left, mid, right = candles[i - 2], candles[i - 1], candles[i]
+        mid_range = max(mid["high"] - mid["low"], 0.0)
+        mid_body = abs(mid["close"] - mid["open"])
+        body_ratio = mid_body / mid_range if mid_range else 0.0
+        range_ratio = mid_range / max(atr, 1e-9)
+        displacement = mid_range / max(avg_range, 1e-9)
 
         if right["low"] > left["high"]:
-
-            gap = (
-                right["low"] -
-                left["high"]
-            )
-
-            if gap >= min_gap:
-
-                cands.append({
-                    "type": "Bullish FVG",
-                    "label": "BULLISH FVG",
-                    "direction": "bullish",
-                    "top": round(
-                        right["low"],
-                        2
-                    ),
-                    "bottom": round(
-                        left["high"],
-                        2
-                    ),
-                    "timeStart": left["time"],
-                    "createdTime": right["time"],
-                    "createdIndex": i,
-                    "color": "rgba(0,255,136,0.16)",
-                    "borderColor": "#00ff88",
-                    "layer": "fvg",
-                    "status": "active",
-                    "valid": True
-                })
-
+            gap = right["low"] - left["high"]
+            direction = "bullish"
+            valid = mid["close"] > mid["open"]
         elif right["high"] < left["low"]:
-
-            gap = (
-                left["low"] -
-                right["high"]
-            )
-
-            if gap >= min_gap:
-
-                cands.append({
-                    "type": "Bearish FVG",
-                    "label": "BEARISH FVG",
-                    "direction": "bearish",
-                    "top": round(
-                        left["low"],
-                        2
-                    ),
-                    "bottom": round(
-                        right["high"],
-                        2
-                    ),
-                    "timeStart": left["time"],
-                    "createdTime": right["time"],
-                    "createdIndex": i,
-                    "color": "rgba(255,68,68,0.16)",
-                    "borderColor": "#ff4444",
-                    "layer": "fvg",
-                    "status": "active",
-                    "valid": True
-                })
-
-    for zone in cands:
-
-        _state = _zone_state(
-            zone,
-            candles
-        )
-
-        if _state.get("status") in {"violated", "invalid"}:
-
-            if (
-                violated_out is not None
-                and _state.get("status") == "violated"
-            ):
-                _v = dict(zone)
-                _v["violatedTime"] = _state.get("violated_time")
-                _v.pop("createdIndex", None)
-                violated_out.append(_v)
-
+            gap = left["low"] - right["high"]
+            direction = "bearish"
+            valid = mid["close"] < mid["open"]
+        else:
             continue
 
-        zone.pop(
-            "createdIndex",
-            None
-        )
+        # Wick-to-wick gap significance + real displacement.
+        gap_atr = gap / max(atr, 1e-9)
+        if gap_atr < 0.12:
+            continue
+        if range_ratio < 0.75 or displacement < 0.90:
+            continue
+        if body_ratio < 0.55 or not valid:
+            continue
 
-        _add_zone_state(
-            zone,
-            candles
-        )
+        quality = 0.0
+        quality += min(30.0, gap_atr * 30.0)
+        quality += min(25.0, range_ratio * 15.0)
+        quality += min(20.0, displacement * 12.0)
+        quality += min(15.0, body_ratio * 15.0)
+        # Structure proximity is additive; actual BOS/MSS is evaluated later.
+        quality += 10.0 if mid_body >= atr * 0.5 else 0.0
+        quality = round(min(100.0, quality), 1)
 
+        if direction == "bullish":
+            top, bottom = right["low"], left["high"]
+            color, border = "rgba(0,255,136,0.16)", "#00ff88"
+            label = "BULLISH FVG"
+        else:
+            top, bottom = left["low"], right["high"]
+            color, border = "rgba(255,68,68,0.16)", "#ff4444"
+            label = "BEARISH FVG"
+
+        if quality < 52.0:
+            continue
+
+        cands.append({
+            "type": "Bullish FVG" if direction == "bullish" else "Bearish FVG",
+            "label": label, "direction": direction,
+            "top": round(top, 2), "bottom": round(bottom, 2),
+            "timeStart": left["time"], "createdTime": right["time"],
+            "createdIndex": i, "color": color, "borderColor": border,
+            "layer": "fvg", "status": "active", "valid": True,
+            "quality": quality, "gap": round(gap, 4),
+            "gap_atr": round(gap_atr, 3),
+            "displacement_atr": round(range_ratio, 3),
+            "body_ratio": round(body_ratio, 3),
+            "displacement": round(displacement, 3)
+        })
+
+    for zone in cands:
+        state = _zone_state(zone, candles)
+        if state.get("status") in {"violated", "invalid"}:
+            if violated_out is not None and state.get("status") == "violated":
+                v = dict(zone)
+                v["violatedTime"] = state.get("violated_time")
+                v.pop("createdIndex", None)
+                violated_out.append(v)
+            continue
+        zone.pop("createdIndex", None)
+        _add_zone_state(zone, candles)
         active.append(zone)
 
+    active.sort(key=lambda z: (z.get("quality", 0), z.get("createdTime", 0)))
     return active[-max_zones:]
 
 
@@ -3043,16 +3030,6 @@ def build_smc_commentary(structure, mss, liq_events, fvg_zones, ob_zones, sr_lev
     confirmed=[]
     waits=[]
 
-    early = signal_data.get("early_zone") or {}
-
-    def _is_early_zone(z):
-        return (
-            bool(early)
-            and safe_float(z.get("top"), None) == early.get("top")
-            and safe_float(z.get("bottom"), None) == early.get("bottom")
-            and str(z.get("direction", "")).lower() == early.get("zone_direction")
-        )
-
     for kind, zone_list in (("FVG", fvg_zones), ("OB", ob_zones)):
         for z in zone_list:
             d=z.get("direction")
@@ -3070,9 +3047,6 @@ def build_smc_commentary(structure, mss, liq_events, fvg_zones, ob_zones, sr_lev
             elif z.get("retested"):
                 waits.append(name)
                 comments.append(f"WAIT — {name.upper()} has been retested. Wait for a close inside/on the valid side of the zone.")
-            elif _is_early_zone(z):
-                waits.append(name)
-                comments.append(f"EARLY {side} — price is approaching the {name.upper()} ({early.get('distance')} away). Setup is not confirmed yet, so this is a plain {side} only (no STRONG signal) — higher risk.")
             else:
                 waits.append(name)
                 comments.append(f"Wait for price to reach the {name} and close inside it before considering a {side} setup.")
@@ -3118,9 +3092,7 @@ def build_smc_commentary(structure, mss, liq_events, fvg_zones, ob_zones, sr_lev
         comments.append("CONFLUENCE: no independently confirmed SMC setup is currently present; WAIT for the relevant setup to be respected/confirmed.")
 
     sig_now = signal_data.get("signal")
-    if signal_data.get("early") and sig_now in {"BUY","SELL"}:
-        comments.append(f"EARLY {sig_now} — price is near a valid zone. Signal plotted as a plain {sig_now} because the setup is not confirmed yet (risky).")
-    elif sig_now in {"BUY","STRONG BUY"}:
+    if sig_now in {"BUY","STRONG BUY"}:
         comments.append(f"{sig_now} SETUP CONFIRMED. Independent bullish SMC evidence is currently respected/confirmed.")
     elif sig_now in {"SELL","STRONG SELL"}:
         comments.append(f"{sig_now} SETUP CONFIRMED. Independent bearish SMC evidence is currently respected/confirmed.")
@@ -3130,153 +3102,175 @@ def build_smc_commentary(structure, mss, liq_events, fvg_zones, ob_zones, sr_lev
     return comments
 
 
+def detect_meaningful_trendlines(candles, max_lines=4):
+    """Detect diagonal liquidity from meaningful swing points only.
+
+    Trendlines are evidence, never standalone BUY/SELL generators. A valid
+    candidate needs separated swings and repeated interaction with the line.
+    """
+    if len(candles) < 35:
+        return []
+    sh = find_swing_highs(candles, 3, 3)
+    sl = find_swing_lows(candles, 3, 3)
+    lines = []
+
+    def build(points, bullish):
+        out = []
+        for a_pos in range(max(0, len(points)-8), len(points)-1):
+            for b_pos in range(a_pos+1, len(points)):
+                a, b = points[a_pos], points[b_pos]
+                if b - a < 8:
+                    continue
+                p1 = candles[a]["low" if bullish else "high"]
+                p2 = candles[b]["low" if bullish else "high"]
+                slope = (p2 - p1) / float(b - a)
+                if bullish and slope <= 0:
+                    continue
+                if not bullish and slope >= 0:
+                    continue
+                touches = 0
+                last_touch = b
+                tol = (calculate_atr(candles[max(0,b-30):b+1]) or calculate_atr(candles) or 1.0) * 0.18
+                for j in range(b+1, len(candles)):
+                    projected = p2 + slope * (j-b)
+                    actual = candles[j]["low" if bullish else "high"]
+                    if abs(actual - projected) <= tol:
+                        touches += 1
+                        last_touch = j
+                if touches < 1:
+                    continue
+                score = 50 + min(25, touches * 10) + min(20, (b-a)/4)
+                out.append({
+                    "type": "BULLISH_TRENDLINE" if bullish else "BEARISH_TRENDLINE",
+                    "direction": "bullish" if bullish else "bearish",
+                    "time1": candles[a]["time"], "price1": round(p1,2),
+                    "time2": candles[b]["time"], "price2": round(p2,2),
+                    "slope": slope, "touches": touches + 2,
+                    "quality": round(min(100, score),1),
+                    "liquidity_side": "sell-side" if bullish else "buy-side",
+                    "layer": "trendline"
+                })
+        return out
+
+    lines.extend(build(sl, True))
+    lines.extend(build(sh, False))
+    # Prefer the most recent high-quality distinct lines.
+    lines.sort(key=lambda x: (x["quality"], x["time2"]), reverse=True)
+    chosen=[]
+    seen=set()
+    for line in lines:
+        key=(line["direction"], line["time1"], line["time2"])
+        if key in seen:
+            continue
+        seen.add(key); chosen.append(line)
+        if len(chosen) >= max_lines:
+            break
+    return chosen
+
+
+def _trendline_context(candles, trendlines, atr):
+    price = candles[-1]["close"]
+    bullish = bearish = 0
+    sweep_events = []
+    for tl in trendlines:
+        t2 = int(tl["time2"])
+        # Project using candle timestamps through the latest bar.
+        i2 = next((i for i,c in enumerate(candles) if int(c["time"]) == t2), None)
+        if i2 is None:
+            continue
+        slope = tl["slope"]
+        projected = tl["price2"] + slope * (len(candles)-1-i2)
+        distance = abs(price - projected)
+        if distance <= atr * 0.35:
+            if tl["direction"] == "bullish": bullish += 1
+            else: bearish += 1
+        last = candles[-1]
+        prev = candles[-2] if len(candles) > 1 else last
+        if tl["direction"] == "bullish" and prev["low"] >= projected and last["low"] < projected and last["close"] > projected:
+            sweep_events.append("BULLISH TRENDLINE SWEEP")
+        elif tl["direction"] == "bearish" and prev["high"] <= projected and last["high"] > projected and last["close"] < projected:
+            sweep_events.append("BEARISH TRENDLINE SWEEP")
+    return bullish, bearish, sweep_events
+
+
+def _smc_quality_layer(candles, interval, mtf, structure, liq_events, fvg_zones, ob_zones, pd, mss, sr_levels, trendlines):
+    """Final evidence layer: quality over raw setup count."""
+    price = candles[-1]["close"]
+    atr = calculate_atr(candles) or max(price*0.001,0.1)
+    bull=0.0; bear=0.0; bull_reasons=[]; bear_reasons=[]
+
+    def add(side, points, reason):
+        nonlocal bull,bear
+        if side=="BUY": bull += points; bull_reasons.append(reason)
+        else: bear += points; bear_reasons.append(reason)
+
+    if structure.get("event") in {"BOS","CHoCH"}:
+        add("BUY" if structure.get("state")=="BULLISH" else "SELL", 2.0, "confirmed structure break")
+    if mss.get("direction") in {"bullish","bearish"}:
+        add("BUY" if mss["direction"]=="bullish" else "SELL", 2.0, "displacement MSS")
+    for ev in liq_events:
+        if ev.get("type")=="SELL_SIDE_SWEEP": add("BUY",2.0,"sell-side liquidity sweep")
+        if ev.get("type")=="BUY_SIDE_SWEEP": add("SELL",2.0,"buy-side liquidity sweep")
+
+    for z in fvg_zones + ob_zones:
+        if z.get("status") != "respected" or not z.get("confirmed"): continue
+        q=float(z.get("quality",70)) if z.get("layer")=="fvg" else 65.0
+        pts=1.0 if q<75 else 1.5 if q<88 else 2.0
+        add("BUY" if z.get("direction")=="bullish" else "SELL",pts, f"quality {z.get('label','zone')}" )
+
+    bull_mtf=sum(1 for v in mtf.values() if v=="BULLISH")
+    bear_mtf=sum(1 for v in mtf.values() if v=="BEARISH")
+    if bull_mtf >= 3: add("BUY",1.5,"MTF bullish agreement")
+    if bear_mtf >= 3: add("SELL",1.5,"MTF bearish agreement")
+    if bull_mtf <= 1 and bear_mtf >= 4: bull -= 1.5
+    if bear_mtf <= 1 and bull_mtf >= 4: bear -= 1.5
+
+    pd_state = str(pd.get("zone", pd.get("state", ""))).upper() if isinstance(pd,dict) else ""
+    if "DISCOUNT" in pd_state: add("BUY",1.0,"discount zone")
+    if "PREMIUM" in pd_state: add("SELL",1.0,"premium zone")
+
+    tb,tr,sweeps=_trendline_context(candles,trendlines,atr)
+    if tb: add("BUY",0.5,"bullish trendline liquidity")
+    if tr: add("SELL",0.5,"bearish trendline liquidity")
+    for ev in sweeps:
+        add("BUY" if "BULLISH" in ev else "SELL",1.0,ev.lower())
+
+    conflict = abs(bull-bear) < 1.5
+    direction = "WAIT"
+    score=max(bull,bear)
+    if not conflict:
+        if bull > bear: direction="BUY"
+        elif bear > bull: direction="SELL"
+    # Require actual SMC structure/liquidity/zone evidence, not proximity alone.
+    if score < 5.0: direction="WAIT"
+    return {"direction":direction,"bull":round(bull,2),"bear":round(bear,2),"score":round(score,2),"conflict":conflict,
+            "bull_reasons":bull_reasons,"bear_reasons":bear_reasons,"trendline_sweeps":sweeps}
+
+
 def build_signal(
-    candles,
-    interval,
-    mtf,
-    structure,
-    liq_events,
-    fvg_zones,
-    ob_zones,
-    pd,
-    chart_patterns=None,
-    mss=None,
-    sr_levels=None
+    candles, interval, mtf, structure, liq_events, fvg_zones, ob_zones, pd,
+    chart_patterns=None, mss=None, sr_levels=None, trendlines=None
 ):
     price = candles[-1]["close"]
     rsi = calculate_rsi([c["close"] for c in candles])
-    reasons = []
-    mss = mss or {"direction": "NONE"}
-    sr_levels = sr_levels or []
-    chart_patterns = chart_patterns or []
+    reasons=[]; mss=mss or {"direction":"NONE"}; sr_levels=sr_levels or []; chart_patterns=chart_patterns or []; trendlines=trendlines or []
+    quality=_smc_quality_layer(candles,interval,mtf,structure,liq_events,fvg_zones,ob_zones,pd,mss,sr_levels,trendlines)
+    direction=quality["direction"]
+    reasons.extend(quality["bull_reasons"] if direction=="BUY" else quality["bear_reasons"] if direction=="SELL" else quality["bull_reasons"]+quality["bear_reasons"])
+    if quality["conflict"]: reasons.append("MTF/SMC evidence conflict — WAIT")
+    if direction=="WAIT": reasons.append("WAIT — no sufficiently confirmed, high-quality SMC setup")
 
-    # Each SMC strategy is evaluated independently. Violated zones are not
-    # votes for the opposite side; they are simply removed from consideration.
-    bullish_setups = []
-    bearish_setups = []
-
-    if structure.get("state") == "BULLISH":
-        bullish_setups.append("BOS/CHoCH")
-    elif structure.get("state") == "BEARISH":
-        bearish_setups.append("BOS/CHoCH")
-
-    for ev in liq_events:
-        if ev["type"] == "SELL_SIDE_SWEEP":
-            bullish_setups.append("Liquidity Sweep")
-            reasons.append("Sell-side liquidity swept")
-        elif ev["type"] == "BUY_SIDE_SWEEP":
-            bearish_setups.append("Liquidity Sweep")
-            reasons.append("Buy-side liquidity swept")
-
-    bullish_zones = [z for z in fvg_zones + ob_zones if z.get("direction") == "bullish" and z.get("status") == "respected" and z.get("confirmed")]
-    bearish_zones = [z for z in fvg_zones + ob_zones if z.get("direction") == "bearish" and z.get("status") == "respected" and z.get("confirmed")]
-    if bullish_zones:
-        bullish_setups.extend(["FVG/OB"] * len(bullish_zones))
-        reasons.append(f"{len(bullish_zones)} respected bullish FVG/OB setup(s)")
-    if bearish_zones:
-        bearish_setups.extend(["FVG/OB"] * len(bearish_zones))
-        reasons.append(f"{len(bearish_zones)} respected bearish FVG/OB setup(s)")
-
-    if mss.get("direction") == "bullish":
-        bullish_setups.append("MSS")
-        reasons.append("Bullish MSS with displacement")
-    elif mss.get("direction") == "bearish":
-        bearish_setups.append("MSS")
-        reasons.append("Bearish MSS with displacement")
-
-    confirmed_sr_bull = [s for s in sr_levels if s.get("status") == "CONFIRMED" and s.get("direction") == "bullish"]
-    confirmed_sr_bear = [s for s in sr_levels if s.get("status") == "CONFIRMED" and s.get("direction") == "bearish"]
-    if confirmed_sr_bull:
-        bullish_setups.extend(["Support/Resistance"] * len(confirmed_sr_bull))
-        reasons.append("Confirmed bullish S/R flip")
-    if confirmed_sr_bear:
-        bearish_setups.extend(["Support/Resistance"] * len(confirmed_sr_bear))
-        reasons.append("Confirmed bearish S/R flip")
-
-    bullish_patterns = [p for p in chart_patterns if p.get("direction") == "bullish" and p.get("confirmed") is True]
-    bearish_patterns = [p for p in chart_patterns if p.get("direction") == "bearish" and p.get("confirmed") is True]
-
-    # MTF and existing chart patterns remain contextual evidence, not required
-    # gates for an independent SMC setup.
-    bull_mtf = sum(1 for v in mtf.values() if v == "BULLISH")
-    bear_mtf = sum(1 for v in mtf.values() if v == "BEARISH")
-    if bull_mtf >= 3:
-        reasons.append(f"MTF alignment: {bull_mtf}/6 bullish")
-    elif bear_mtf >= 3:
-        reasons.append(f"MTF alignment: {bear_mtf}/6 bearish")
-    if bullish_patterns and not bearish_patterns:
-        reasons.append("Confirmed bullish chart pattern")
-    elif bearish_patterns and not bullish_patterns:
-        reasons.append("Confirmed bearish chart pattern")
-    elif bullish_patterns and bearish_patterns:
-        reasons.append("Mixed confirmed chart-pattern signals")
-
-    bull_count = len(bullish_setups)
-    bear_count = len(bearish_setups)
-
-    # Confirmation/respect is evaluated before raw count. Once invalidated
-    # setups are removed, the remaining confirmed side can signal by itself.
-    if bull_count > 0 and bear_count == 0:
-        direction = "BUY"
-    elif bear_count > 0 and bull_count == 0:
-        direction = "SELL"
-    elif bull_count > bear_count:
-        direction = "BUY"
-    elif bear_count > bull_count:
-        direction = "SELL"
-    else:
-        direction = "WAIT"
-
-    # Early signal: no confirmed side yet, but price is approaching a valid
-    # untouched FVG/OB. Plain BUY/SELL only - never STRONG (risky setup).
-    early_zone = None
-    if direction == "WAIT":
-        _near_atr = calculate_atr(candles) or max(price * 0.001, 0.10)
-        early_zone = _find_near_zone_setup(price, _near_atr, fvg_zones + ob_zones)
-        if early_zone:
-            direction = early_zone["direction"]
-            reasons.append(
-                f"Early {direction}: price approaching {early_zone['zone']} ({early_zone['distance']} away)"
-            )
-
-    # Context can increase strength, but cannot overturn a confirmed SMC side.
-    confluence = max(bull_count, bear_count)
-    aligned_context = (direction == "BUY" and bull_mtf >= 3) or (direction == "SELL" and bear_mtf >= 3)
-    strong = confluence >= 2 or (confluence >= 1 and aligned_context)
-
-    if early_zone:
-        strong = False
-
-    if direction == "BUY":
-        sig = "STRONG BUY" if strong else "BUY"
-    elif direction == "SELL":
-        sig = "STRONG SELL" if strong else "SELL"
-    else:
-        sig = "WAIT"
-
-    # Keep a numerical score for the existing API, now representing the
-    # independent confirmed SMC setup balance rather than a hidden gate.
-    score = (bull_count - bear_count) * 3
-    if aligned_context and direction != "WAIT":
-        score += 1 if direction == "BUY" else -1
-
-    atr = calculate_atr(candles) or max(price * 0.001, 0.10)
-    return {
-        "signal": sig,
-        "score": score,
-        "confidence": round(clamp(50 + min(45, abs(score) * 5), 50, 95)),
-        "rsi": rsi,
-        "reasons": reasons,
-        "bullish_mtf": bull_mtf,
-        "bearish_mtf": bear_mtf,
-        "atr": round(atr, 4),
-        "confirmed_patterns": [p["name"] for p in chart_patterns],
-        "bullish_setups": bullish_setups,
-        "bearish_setups": bearish_setups,
-        "early": bool(early_zone),
-        "early_zone": early_zone
-    }
-
+    strong = quality["score"] >= 7.0 and not quality["conflict"]
+    sig = "STRONG BUY" if direction=="BUY" and strong else "BUY" if direction=="BUY" else "STRONG SELL" if direction=="SELL" and strong else "SELL" if direction=="SELL" else "WAIT"
+    score = quality["score"] if direction=="BUY" else -quality["score"] if direction=="SELL" else 0
+    confidence=round(clamp(50 + min(45, quality["score"]*6),50,95)) if direction!="WAIT" else 50
+    atr=calculate_atr(candles) or max(price*0.001,0.1)
+    # No early zone signal: approaching an untouched zone is context only.
+    return {"signal":sig,"score":round(score,2),"confidence":confidence,"rsi":rsi,"reasons":reasons,
+            "bullish_mtf":sum(1 for v in mtf.values() if v=="BULLISH"),
+            "bearish_mtf":sum(1 for v in mtf.values() if v=="BEARISH"),"atr":round(atr,4),
+            "confirmed_patterns":[p["name"] for p in chart_patterns],"bullish_setups":quality["bull_reasons"],
+            "bearish_setups":quality["bear_reasons"],"early":False,"early_zone":None,"quality":quality}
 
 
 def smc_analysis(interval="5m"):
@@ -3406,6 +3400,8 @@ def smc_analysis(interval="5m"):
         smc_candles
     )
 
+    trendlines = detect_meaningful_trendlines(smc_candles)
+
     sr_levels = detect_support_resistance(
         smc_candles
     )
@@ -3433,10 +3429,14 @@ def smc_analysis(interval="5m"):
         pd,
         chart_patterns,
         mss,
-        sr_levels
+        sr_levels,
+        trendlines
     )
 
     lines = []
+
+    for tl in trendlines:
+        lines.append(dict(tl))
 
     if structure["level"] is not None:
 
@@ -3561,23 +3561,16 @@ def smc_analysis(interval="5m"):
             else static_candles[-1]
         )
 
+        q=signal_data.get("quality", {})
+        setup_parts=[str(signal_candle.get("time")), str(signal.split()[-1]), str(q.get("direction")), str(q.get("score"))]
+        setup_parts.extend(sorted(str(x) for x in q.get("bull_reasons",[]) if "quality" in str(x) or "sweep" in str(x)))
+        setup_parts.extend(sorted(str(x) for x in q.get("bear_reasons",[]) if "quality" in str(x) or "sweep" in str(x)))
+        setup_id="|".join(setup_parts)
+
         if "BUY" in signal:
-
-            _smc_record_signal(
-                interval,
-                "BUY",
-                signal,
-                signal_candle
-            )
-
+            _smc_record_signal(interval,"BUY",signal,signal_candle,setup_id)
         elif "SELL" in signal:
-
-            _smc_record_signal(
-                interval,
-                "SELL",
-                signal,
-                signal_candle
-            )
+            _smc_record_signal(interval,"SELL",signal,signal_candle,setup_id)
 
     # Only report zone violations from the last 10 candles.
     _recent_cut = smc_candles[-10]["time"]
@@ -3690,7 +3683,7 @@ def smc_analysis(interval="5m"):
             if _active
             else None
         ),
-        "early_signal": signal_data.get("early", False),
+        "early_signal": False,
 
         "score": signal_data["score"],
         "confidence": signal_data["confidence"],
@@ -3705,6 +3698,8 @@ def smc_analysis(interval="5m"):
         "markers": markers,
         "lines": lines,
         "zones": zones,
+        "trendlines": trendlines,
+        "quality": signal_data.get("quality", {}),
 
         "fvg_zones": fvg_zones,
         "ob_zones": ob_zones,
@@ -3783,12 +3778,14 @@ NM_EVENT_AFTER_MINUTES = 30
 NM_CELEBRATION_START = 10
 NM_CELEBRATION_END = 20
 NM_CALENDAR_REFRESH = 300
+NM_CALENDAR_PREDICTION_REFRESH = 30
 
 # Prediction / scoring tuning
 NM_HIST_MIN_SAMPLE = 3      # need at least this many past matches to use history
-NM_HIST_FULL_SAMPLE = 5     # history reaches full weight at this many matches
+NM_HIST_FULL_SAMPLE = 8     # history reaches full weight at this many relevant matches
 NM_MIN_MOVE = 0.50          # smaller 30m moves than this are UNRESOLVED (noise)
 NM_RESEARCH_REFRESH = 180
+NM_MAX_HISTORICAL_MATCHES = 50
 
 _nm_last_calendar = []
 _nm_calendar_time = 0
@@ -4021,7 +4018,7 @@ def _cal_save_disk(data):
         pass
 
 
-def _fetch_calendar_json():
+def _fetch_calendar_json(force=False):
     """Robust calendar feed fetch shared by the news popup and the
     News Analysis engine.
 
@@ -4045,7 +4042,8 @@ def _fetch_calendar_json():
             _cal_json_cache["time"] = disk_time
 
     if (
-        _cal_json_cache["data"] is not None
+        not force
+        and _cal_json_cache["data"] is not None
         and now - _cal_json_cache["time"] < _CAL_FRESH_SECONDS
     ):
         return _cal_json_cache["data"]
@@ -4058,7 +4056,8 @@ def _fetch_calendar_json():
         now = time.time()
 
         if (
-            _cal_json_cache["data"] is not None
+            not force
+            and _cal_json_cache["data"] is not None
             and now - _cal_json_cache["time"] < _CAL_FRESH_SECONDS
         ):
             return _cal_json_cache["data"]
@@ -4132,20 +4131,35 @@ def _nm_get_calendar():
     now = time.time()
 
     with _nm_lock:
+        refresh_interval = NM_CALENDAR_REFRESH
+
+        # During the critical 30-minute pre-news window, refresh the
+        # News Machine calendar much more frequently so forecast/previous
+        # changes and newly published events are not hidden by the normal
+        # five-minute News Machine cache. Outside that window, retain the
+        # existing five-minute behavior.
+        now_dt = datetime.now(timezone.utc)
+        for cached_event in _nm_last_calendar:
+            event_time = _nm_parse_time(cached_event.get("date"))
+            if event_time:
+                minutes_until = (event_time - now_dt).total_seconds() / 60
+                if 0 < minutes_until <= NM_EVENT_BEFORE_MINUTES:
+                    refresh_interval = NM_CALENDAR_PREDICTION_REFRESH
+                    break
 
         if (
             now -
             _nm_calendar_time
             <
-            NM_CALENDAR_REFRESH
+            refresh_interval
         ):
-            return list(
-                _nm_last_calendar
-            )
+            return list(_nm_last_calendar)
 
     try:
 
-        data = _fetch_calendar_json()
+        data = _fetch_calendar_json(
+            force=(refresh_interval == NM_CALENDAR_PREDICTION_REFRESH)
+        )
 
         if data is None:
 
@@ -4638,651 +4652,571 @@ def _nm_research_event(event):
     return result
 
 
+def _nm_event_family(event):
+    """Normalize a calendar title into a stable economic event family.
+
+    This is used only by the News Machine so historical reactions are
+    compared with the same kind of release instead of relying only on
+    loose title-word overlap.
+    """
+    title = str(event.get("title", "")).lower()
+
+    families = [
+        ("nfp", ["nonfarm", "non-farm", "non farm", "payroll"]),
+        ("unemployment", ["unemployment rate"]),
+        ("jobless_claims", ["initial claims", "continuing claims", "jobless claims"]),
+        ("average_hourly_earnings", ["average hourly earnings", "hourly earnings"]),
+        ("cpi", ["consumer price index", "cpi"]),
+        ("core_cpi", ["core cpi", "core consumer price"]),
+        ("ppi", ["producer price index", "ppi"]),
+        ("core_ppi", ["core ppi"]),
+        ("pce", ["personal consumption expenditures", "pce"]),
+        ("core_pce", ["core pce"]),
+        ("retail_sales", ["retail sales"]),
+        ("core_retail_sales", ["core retail sales"]),
+        ("gdp", ["gross domestic product", "gdp"]),
+        ("ism_manufacturing", ["ism manufacturing", "manufacturing pmi"]),
+        ("ism_services", ["ism services", "services pmi"]),
+        ("consumer_confidence", ["consumer confidence"]),
+        ("consumer_sentiment", ["consumer sentiment"]),
+        ("durable_goods", ["durable goods"]),
+        ("industrial_production", ["industrial production"]),
+        ("fed_rate", ["federal funds rate", "fed interest rate", "interest rate decision", "fomc"]),
+        ("fed_minutes", ["fomc minutes", "fed minutes"]),
+        ("trade_balance", ["trade balance"]),
+        ("housing", ["housing starts", "building permits", "existing home sales", "new home sales"]),
+    ]
+
+    for family, needles in families:
+        if any(needle in title for needle in needles):
+            return family
+
+    # Stable fallback: remove generic words which otherwise make different
+    # releases look artificially similar.
+    words = [
+        w for w in _nm_re.findall(r"[a-z0-9]+", title)
+        if len(w) > 2 and w not in {"actual", "forecast", "previous", "month", "year"}
+    ]
+
+    return "generic:" + "_".join(words[:5]) if words else "generic"
+
+
+def _nm_event_numeric_context(event):
+    forecast = _nm_safe_number(event.get("forecast"))
+    previous = _nm_safe_number(event.get("previous"))
+
+    if forecast is None or previous is None:
+        return None
+
+    scale = max(abs(previous), abs(forecast), 1.0)
+    change = forecast - previous
+
+    return {
+        "forecast": forecast,
+        "previous": previous,
+        "change": change,
+        "normalized_change": change / scale
+    }
+
+
+def _nm_direction_from_macro(family, change):
+    """Translate expected macro direction into its usual gold bias.
+
+    This is a pre-release expectation only. Actual is deliberately never
+    used here because the prediction must be made before the release.
+    """
+    if change is None or abs(change) < 0.000001:
+        return None
+
+    bearish_gold = {
+        "nfp", "average_hourly_earnings", "cpi", "core_cpi", "ppi", "core_ppi",
+        "pce", "core_pce", "retail_sales", "core_retail_sales", "gdp",
+        "ism_manufacturing", "ism_services", "consumer_confidence",
+        "consumer_sentiment", "durable_goods", "industrial_production",
+        "fed_rate", "trade_balance", "housing"
+    }
+
+    bullish_gold = {
+        "unemployment", "jobless_claims"
+    }
+
+    if family in bullish_gold:
+        return "BUY" if change > 0 else "SELL"
+
+    if family in bearish_gold:
+        return "SELL" if change > 0 else "BUY"
+
+    return None
+
+
+def _nm_trend_from_closes(closes, fast=8, slow=21):
+    if len(closes) < slow:
+        return "NEUTRAL"
+
+    fast_avg = _nm_mean(closes[-fast:])
+    slow_avg = _nm_mean(closes[-slow:])
+
+    if fast_avg > slow_avg:
+        return "BULLISH"
+    if fast_avg < slow_avg:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
 def _nm_market_context():
     try:
+        candles_5m = get_gold_with_live("5m")
+        candles_15m = get_gold_with_live("15m")
+        candles_1h = get_gold_with_live("1h")
 
-        candles = get_gold_with_live(
-            "5m"
-        )
+        if len(candles_5m) < 30:
+            return {"available": False}
 
-        if len(candles) < 30:
-            return {
-                "available": False
-            }
+        closes_5m = [c["close"] for c in candles_5m]
+        closes_15m = [c["close"] for c in candles_15m]
+        closes_1h = [c["close"] for c in candles_1h]
 
-        closes = [
-            c["close"]
-            for c in candles
-        ]
-
-        price = closes[-1]
-
-        short = _nm_mean(
-            closes[-10:]
-        )
-
-        medium = _nm_mean(
-            closes[-20:]
-        )
-
-        rsi = calculate_rsi(
-            closes
-        )
-
-        atr = calculate_atr(
-            candles
-        )
-
-        structure = detect_structure(
-            candles
-        )
+        price = closes_5m[-1]
+        short = _nm_mean(closes_5m[-10:])
+        medium = _nm_mean(closes_5m[-20:])
+        rsi = calculate_rsi(closes_5m)
+        atr = calculate_atr(candles_5m)
+        structure = detect_structure(candles_5m)
 
         try:
-            smc = smc_analysis(
-                "5m"
-            )
+            smc = smc_analysis("5m")
         except Exception:
             smc = {}
 
-        trend = "NEUTRAL"
+        trend_5m = _nm_trend_from_closes(closes_5m, 8, 21)
+        trend_15m = _nm_trend_from_closes(closes_15m, 6, 18)
+        trend_1h = _nm_trend_from_closes(closes_1h, 5, 15)
 
-        if short > medium:
-            trend = "BULLISH"
+        # Compare the latest 5m ATR with the immediately preceding ATR block.
+        # This gives the News Machine a simple volatility regime without
+        # changing the normal ATR/SMC calculations.
+        current_atr = calculate_atr(candles_5m[-30:], 14)
+        previous_atr = calculate_atr(candles_5m[-45:-15], 14)
+        volatility_ratio = (
+            current_atr / previous_atr
+            if previous_atr > 0
+            else 1.0
+        )
 
-        elif short < medium:
-            trend = "BEARISH"
+        if volatility_ratio >= 1.50:
+            volatility = "EXTREME"
+        elif volatility_ratio >= 1.20:
+            volatility = "HIGH"
+        elif volatility_ratio <= 0.80:
+            volatility = "LOW"
+        else:
+            volatility = "NORMAL"
+
+        bullish_tf = sum(
+            1 for trend in [trend_1h, trend_15m, trend_5m]
+            if trend == "BULLISH"
+        )
+        bearish_tf = sum(
+            1 for trend in [trend_1h, trend_15m, trend_5m]
+            if trend == "BEARISH"
+        )
+
+        if bullish_tf >= 2 and bullish_tf > bearish_tf:
+            mtf_bias = "BUY"
+        elif bearish_tf >= 2 and bearish_tf > bullish_tf:
+            mtf_bias = "SELL"
+        else:
+            mtf_bias = None
 
         return {
             "available": True,
-            "price": round(
-                price,
-                2
-            ),
-            "short_average": round(
-                short,
-                2
-            ),
-            "medium_average": round(
-                medium,
-                2
-            ),
+            "price": round(price, 2),
+            "short_average": round(short, 2),
+            "medium_average": round(medium, 2),
             "rsi": rsi,
             "atr": atr,
-            "trend": trend,
+            "trend": trend_5m,
+            "trend_5m": trend_5m,
+            "trend_15m": trend_15m,
+            "trend_1h": trend_1h,
+            "mtf_bias": mtf_bias,
+            "bullish_timeframes": bullish_tf,
+            "bearish_timeframes": bearish_tf,
+            "volatility": volatility,
+            "volatility_ratio": round(volatility_ratio, 3),
             "structure": structure,
-            "smc_signal": smc.get(
-                "signal"
-            ),
-            "smc_score": smc.get(
-                "score"
-            ),
-            "smc_confidence": smc.get(
-                "confidence"
-            )
+            "smc_signal": smc.get("signal"),
+            "smc_score": smc.get("score"),
+            "smc_confidence": smc.get("confidence")
         }
 
     except Exception as exc:
-
-        print(
-            f"[NEWS MACHINE MARKET] {exc}"
-        )
-
-        return {
-            "available": False
-        }
+        print(f"[NEWS MACHINE MARKET] {exc}")
+        return {"available": False}
 
 
 def _nm_find_historical_matches(event):
-    title = str(
-        event.get(
-            "title",
-            ""
-        )
-    ).lower()
+    family = _nm_event_family(event)
+    numeric = _nm_event_numeric_context(event)
+    title = str(event.get("title", "")).lower()
 
     try:
-
         conn = _nm_db()
-
         rows = conn.execute("""
             SELECT *
             FROM news_event_history
+            WHERE direction IN ('BUY', 'SELL')
             ORDER BY event_time DESC
-            LIMIT 250
+            LIMIT 500
         """).fetchall()
-
         conn.close()
-
     except Exception:
         return []
 
-    matches = []
-
-    words = [
-        w
-        for w in _nm_re.findall(
-            r"[a-z0-9]+",
-            title
-        )
+    words = {
+        w for w in _nm_re.findall(r"[a-z0-9]+", title)
         if len(w) > 2
-    ]
+    }
 
-    if not words:
-        return []
+    scored = []
 
     for row in rows:
+        old = dict(row)
+        old_family = _nm_event_family({"title": old.get("event_title", "")})
 
-        old_title = str(
-            row["event_title"]
-            or
-            ""
-        ).lower()
+        if old_family == family:
+            similarity = 1.0
+        else:
+            old_words = {
+                w for w in _nm_re.findall(r"[a-z0-9]+", str(old.get("event_title", "")).lower())
+                if len(w) > 2
+            }
+            overlap = len(words & old_words)
+            similarity = overlap / max(len(words), 1)
 
-        overlap = sum(
-            1
-            for word in words
-            if word in old_title
-        )
+        if similarity < 0.45:
+            continue
 
-        similarity = (
-            overlap /
-            max(
-                len(words),
-                1
-            )
-        )
+        # Prefer historical releases with a similar expected surprise.
+        surprise_similarity = 0.0
+        if numeric:
+            old_forecast = _nm_safe_number(old.get("forecast"))
+            old_previous = _nm_safe_number(old.get("previous"))
+            if old_forecast is not None and old_previous is not None:
+                old_scale = max(abs(old_forecast), abs(old_previous), 1.0)
+                old_change = (old_forecast - old_previous) / old_scale
+                difference = abs(
+                    numeric["normalized_change"] - old_change
+                )
+                surprise_similarity = max(0.0, 1.0 - min(difference * 5.0, 1.0))
 
-        if similarity >= 0.45:
-            matches.append(
-                dict(row)
-            )
+        score = (similarity * 0.70) + (surprise_similarity * 0.30)
+        old["_match_score"] = round(score, 4)
+        old["_surprise_similarity"] = round(surprise_similarity, 4)
+        scored.append(old)
 
-    return matches[:30]
+    scored.sort(key=lambda item: item.get("_match_score", 0), reverse=True)
+    return scored[:NM_MAX_HISTORICAL_MATCHES]
 
 
 def _nm_historical_bias(matches):
     if not matches:
-        return {
-            "direction": None,
-            "strength": 0,
-            "sample": 0
-        }
+        return {"direction": None, "strength": 0, "sample": 0, "buy_weight": 0, "sell_weight": 0}
 
-    bullish = 0
-    bearish = 0
+    buy_weight = 0.0
+    sell_weight = 0.0
 
     for match in matches:
-
-        direction = str(
-            match.get(
-                "direction"
-            )
-            or
-            ""
-        ).upper()
-
+        weight = float(match.get("_match_score", 1.0) or 1.0)
+        direction = str(match.get("direction") or "").upper()
         if direction == "BUY":
-            bullish += 1
-
+            buy_weight += weight
         elif direction == "SELL":
-            bearish += 1
+            sell_weight += weight
 
-    total = bullish + bearish
+    total = buy_weight + sell_weight
+    if total <= 0:
+        return {"direction": None, "strength": 0, "sample": 0, "buy_weight": 0, "sell_weight": 0}
 
-    if total == 0:
-        return {
-            "direction": None,
-            "strength": 0,
-            "sample": 0
-        }
-
-    if bullish > bearish:
-
+    if buy_weight > sell_weight:
         direction = "BUY"
-        strength = (
-            bullish /
-            total
-        )
-
-    elif bearish > bullish:
-
+        strength = buy_weight / total
+    elif sell_weight > buy_weight:
         direction = "SELL"
-        strength = (
-            bearish /
-            total
-        )
-
+        strength = sell_weight / total
     else:
-
         direction = None
         strength = 0
 
     return {
         "direction": direction,
-        "strength": round(
-            strength,
-            3
-        ),
-        "sample": total
+        "strength": round(strength, 3),
+        "sample": len(matches),
+        "buy_weight": round(buy_weight, 3),
+        "sell_weight": round(sell_weight, 3)
     }
 
 
 def _nm_macro_context(event):
-    title = str(
-        event.get(
-            "title",
-            ""
-        )
-    ).lower()
+    family = _nm_event_family(event)
+    numeric = _nm_event_numeric_context(event)
 
-    forecast = _nm_safe_number(
-        event.get(
-            "forecast"
-        )
-    )
-
-    previous = _nm_safe_number(
-        event.get(
-            "previous"
-        )
-    )
-
-    if forecast is None or previous is None:
+    if not numeric:
         return {
             "direction": None,
-            "strength": 0
+            "strength": 0,
+            "family": family,
+            "forecast": None,
+            "previous": None,
+            "expected_change": None,
+            "normalized_change": None
         }
 
-    difference = (
-        forecast -
-        previous
+    direction = _nm_direction_from_macro(
+        family,
+        numeric["change"]
     )
 
-    if abs(difference) < 0.000001:
-        return {
-            "direction": None,
-            "strength": 0
-        }
-
-    if any(
-        word in title
-        for word in [
-            "unemployment",
-            "jobless",
-            "initial claims",
-            "continuing claims"
-        ]
-    ):
-
-        direction = (
-            "BUY"
-            if difference > 0
-            else
-            "SELL"
-        )
-
-    else:
-
-        direction = (
-            "SELL"
-            if difference > 0
-            else
-            "BUY"
-        )
+    # Stronger expected changes get slightly more weight, but the macro
+    # component is deliberately capped so it cannot dominate the entire
+    # multi-factor model before the actual release.
+    magnitude = min(
+        abs(numeric["normalized_change"]) * 10.0,
+        1.0
+    )
+    strength = round(
+        0.30 + (0.70 * magnitude),
+        3
+    ) if direction else 0
 
     return {
         "direction": direction,
-        "strength": 0.20
+        "strength": strength,
+        "family": family,
+        "forecast": numeric["forecast"],
+        "previous": numeric["previous"],
+        "expected_change": numeric["change"],
+        "normalized_change": numeric["normalized_change"]
+    }
+
+
+def _nm_historical_prediction_performance(event):
+    family = _nm_event_family(event)
+
+    try:
+        conn = _nm_db()
+        rows = conn.execute("""
+            SELECT event_title, prediction, outcome
+            FROM news_predictions
+            WHERE outcome IN ('WIN', 'LOSS')
+            ORDER BY completed_at DESC
+            LIMIT 500
+        """).fetchall()
+        conn.close()
+    except Exception:
+        return {"sample": 0, "wins": 0, "losses": 0, "win_rate": None}
+
+    wins = 0
+    losses = 0
+
+    for row in rows:
+        if _nm_event_family({"title": row["event_title"]}) != family:
+            continue
+        if str(row["outcome"]).upper() == "WIN":
+            wins += 1
+        elif str(row["outcome"]).upper() == "LOSS":
+            losses += 1
+
+    sample = wins + losses
+    return {
+        "sample": sample,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round((wins / sample) * 100, 2) if sample else None
     }
 
 
 def _nm_make_prediction(event):
-    research = _nm_research_event(
-        event
-    )
-
+    research = _nm_research_event(event)
     market = _nm_market_context()
-
-    historical_matches = (
-        _nm_find_historical_matches(
-            event
-        )
-    )
-
-    historical = _nm_historical_bias(
-        historical_matches
-    )
-
-    macro = _nm_macro_context(
-        event
-    )
+    historical_matches = _nm_find_historical_matches(event)
+    historical = _nm_historical_bias(historical_matches)
+    macro = _nm_macro_context(event)
+    performance = _nm_historical_prediction_performance(event)
 
     buy_score = 0.0
     sell_score = 0.0
     reasons = []
 
-    # History is only used with enough past matches, and its weight
-    # scales up with the sample size (full weight at NM_HIST_FULL_SAMPLE).
-    hist_used = (
-        historical["sample"] >= NM_HIST_MIN_SAMPLE
-    )
-
+    # Relevant historical event reactions are weighted by similarity and
+    # sample size. More evidence is useful, but never allowed to dominate.
+    hist_used = historical["sample"] >= NM_HIST_MIN_SAMPLE
     hist_scale = min(
         historical["sample"] / NM_HIST_FULL_SAMPLE,
         1.0
     )
 
     if hist_used and historical["direction"] == "BUY":
-
-        weight = (
-            4.0 *
-            historical["strength"] *
-            hist_scale
-        )
-
+        weight = 4.5 * historical["strength"] * hist_scale
         buy_score += weight
-
         reasons.append(
-            f"Historical same-event evidence: "
-            f"{historical['sample']} matches favour BUY"
+            f"Historical same-event evidence: {historical['sample']} relevant matches favour BUY"
         )
 
     elif hist_used and historical["direction"] == "SELL":
-
-        weight = (
-            4.0 *
-            historical["strength"] *
-            hist_scale
-        )
-
+        weight = 4.5 * historical["strength"] * hist_scale
         sell_score += weight
-
         reasons.append(
-            f"Historical same-event evidence: "
-            f"{historical['sample']} matches favour SELL"
+            f"Historical same-event evidence: {historical['sample']} relevant matches favour SELL"
         )
 
-    if market.get(
-        "trend"
-    ) == "BULLISH":
-
+    # Multi-timeframe market regime.
+    if market.get("mtf_bias") == "BUY":
         buy_score += 2.0
-
-        reasons.append(
-            "Current Gold short-term trend is bullish"
-        )
-
-    elif market.get(
-        "trend"
-    ) == "BEARISH":
-
+        reasons.append("1H/15M/5M market context is predominantly bullish")
+    elif market.get("mtf_bias") == "SELL":
         sell_score += 2.0
-
-        reasons.append(
-            "Current Gold short-term trend is bearish"
-        )
-
-    smc_signal = str(
-        market.get(
-            "smc_signal"
-        )
-        or
-        ""
-    ).upper()
-
-    if "BUY" in smc_signal:
-
-        buy_score += 2.0
-
-        reasons.append(
-            "Existing SMC engine agrees with BUY"
-        )
-
-    elif "SELL" in smc_signal:
-
-        sell_score += 2.0
-
-        reasons.append(
-            "Existing SMC engine agrees with SELL"
-        )
-
-    structure_state = str(
-        market.get(
-            "structure",
-            {}
-        ).get(
-            "state",
-            ""
-        )
-    ).upper()
-
-    if structure_state == "BULLISH":
-
-        buy_score += 1.5
-
-        reasons.append(
-            "Current market structure is bullish"
-        )
-
-    elif structure_state == "BEARISH":
-
-        sell_score += 1.5
-
-        reasons.append(
-            "Current market structure is bearish"
-        )
-
-    rsi = safe_float(
-        market.get(
-            "rsi"
-        ),
-        50
-    )
-
-    if 52 <= rsi <= 68:
-
-        buy_score += 0.75
-
-        reasons.append(
-            "RSI supports bullish momentum"
-        )
-
-    elif 32 <= rsi <= 48:
-
-        sell_score += 0.75
-
-        reasons.append(
-            "RSI supports bearish momentum"
-        )
-
-    if macro["direction"] == "BUY":
-
-        buy_score += macro["strength"]
-
-        reasons.append(
-            "Forecast/previous macro context mildly favours BUY"
-        )
-
-    elif macro["direction"] == "SELL":
-
-        sell_score += macro["strength"]
-
-        reasons.append(
-            "Forecast/previous macro context mildly favours SELL"
-        )
-
-    news_sentiment = research.get(
-        "news_sentiment"
-    )
-
-    if news_sentiment is not None:
-
-        if news_sentiment > 0.20:
-
+        reasons.append("1H/15M/5M market context is predominantly bearish")
+    else:
+        if market.get("trend_5m") == "BULLISH":
             buy_score += 0.75
-
-            reasons.append(
-                "Online news research has a bullish Gold bias"
-            )
-
-        elif news_sentiment < -0.20:
-
+        elif market.get("trend_5m") == "BEARISH":
             sell_score += 0.75
 
-            reasons.append(
-                "Online news research has a bearish Gold bias"
-            )
+    smc_signal = str(market.get("smc_signal") or "").upper()
+    if smc_signal in {"BUY", "STRONG BUY"}:
+        buy_score += 1.5
+        reasons.append("Existing SMC engine agrees with BUY")
+    elif smc_signal in {"SELL", "STRONG SELL"}:
+        sell_score += 1.5
+        reasons.append("Existing SMC engine agrees with SELL")
 
-    x_sentiment = research.get(
-        "x_sentiment"
-    )
+    structure_state = str(
+        market.get("structure", {}).get("state", "")
+    ).upper()
+    if structure_state == "BULLISH":
+        buy_score += 1.0
+        reasons.append("Current market structure is bullish")
+    elif structure_state == "BEARISH":
+        sell_score += 1.0
+        reasons.append("Current market structure is bearish")
 
+    rsi = safe_float(market.get("rsi"), 50)
+    if 52 <= rsi <= 68:
+        buy_score += 0.60
+        reasons.append("RSI supports bullish momentum")
+    elif 32 <= rsi <= 48:
+        sell_score += 0.60
+        reasons.append("RSI supports bearish momentum")
+
+    if macro["direction"] == "BUY":
+        buy_score += macro["strength"]
+        reasons.append(
+            f"Expected {macro['family']} release bias favours BUY from forecast/previous"
+        )
+    elif macro["direction"] == "SELL":
+        sell_score += macro["strength"]
+        reasons.append(
+            f"Expected {macro['family']} release bias favours SELL from forecast/previous"
+        )
+
+    news_sentiment = research.get("news_sentiment")
+    if news_sentiment is not None:
+        if news_sentiment > 0.20:
+            buy_score += 0.60
+            reasons.append("Recent online news research has a bullish Gold bias")
+        elif news_sentiment < -0.20:
+            sell_score += 0.60
+            reasons.append("Recent online news research has a bearish Gold bias")
+
+    x_sentiment = research.get("x_sentiment")
     if x_sentiment is not None:
-
         if x_sentiment > 0.25:
-
-            buy_score += 0.50
-
-            reasons.append(
-                "X research provides additional bullish context"
-            )
-
+            buy_score += 0.35
+            reasons.append("Recent X research provides bullish context")
         elif x_sentiment < -0.25:
+            sell_score += 0.35
+            reasons.append("Recent X research provides bearish context")
 
-            sell_score += 0.50
-
-            reasons.append(
-                "X research provides additional bearish context"
-            )
+    # Volatility is context, not direction. Record it as evidence so the
+    # confidence calculation can recognize unstable pre-news conditions.
+    volatility = market.get("volatility")
+    if volatility == "EXTREME":
+        reasons.append("Pre-news gold volatility is extreme")
+    elif volatility == "HIGH":
+        reasons.append("Pre-news gold volatility is high")
 
     if buy_score >= sell_score:
-
         prediction = "BUY"
         winning_score = buy_score
         losing_score = sell_score
-
     else:
-
         prediction = "SELL"
         winning_score = sell_score
         losing_score = buy_score
 
-    total = (
-        buy_score +
-        sell_score
+    total = buy_score + sell_score
+    separation = (
+        abs(winning_score - losing_score) / total
+        if total > 0 else 0
     )
 
-    if total <= 0:
-
-        confidence = 50.0
-
-    else:
-
-        separation = (
-            abs(
-                winning_score -
-                losing_score
-            )
-            /
-            total
-        )
-
-        confidence = (
-            50 +
-            (
-                separation *
-                45
-            )
-        )
+    confidence = 50 + (separation * 38)
 
     evidence_count = sum([
-        1
-        if hist_used
-        else 0,
-
-        1
-        if market.get(
-            "available"
-        )
-        else 0,
-
-        1
-        if smc_signal in {
-            "BUY",
-            "SELL",
-            "STRONG BUY",
-            "STRONG SELL"
-        }
-        else 0,
-
-        1
-        if structure_state in {
-            "BULLISH",
-            "BEARISH"
-        }
-        else 0,
-
-        1
-        if news_sentiment is not None
-        else 0,
-
-        1
-        if x_sentiment is not None
-        else 0
+        1 if hist_used else 0,
+        1 if market.get("available") else 0,
+        1 if market.get("mtf_bias") else 0,
+        1 if smc_signal in {"BUY", "SELL", "STRONG BUY", "STRONG SELL"} else 0,
+        1 if structure_state in {"BULLISH", "BEARISH"} else 0,
+        1 if news_sentiment is not None else 0,
+        1 if x_sentiment is not None else 0,
+        1 if macro["direction"] else 0
     ])
 
-    confidence += min(
-        evidence_count * 1.5,
-        7
-    )
+    confidence += min(evidence_count * 1.25, 8)
 
-    confidence = round(
-        clamp(
-            confidence,
-            50,
-            97
-        ),
-        1
-    )
+    # Historical accuracy is a modest confidence adjustment only. It does
+    # not choose the direction and cannot create a prediction by itself.
+    if performance["sample"] >= 5 and performance["win_rate"] is not None:
+        confidence += clamp(
+            (performance["win_rate"] - 50.0) * 0.10,
+            -4.0,
+            4.0
+        )
+        reasons.append(
+            f"Historical {macro['family']} prediction sample: {performance['sample']} completed results"
+        )
+
+    # Conflicting timeframe evidence reduces confidence rather than forcing
+    # an arbitrary direction.
+    if market.get("bullish_timeframes", 0) > 0 and market.get("bearish_timeframes", 0) > 0:
+        confidence -= 2.0
+        reasons.append("Multi-timeframe market evidence is mixed")
+
+    if volatility == "EXTREME":
+        confidence -= 2.0
+
+    confidence = round(clamp(confidence, 50, 97), 1)
 
     return {
         "prediction": prediction,
         "confidence": confidence,
-        "evidence_score": round(
-            max(
-                buy_score,
-                sell_score
-            ),
-            2
-        ),
-        "buy_score": round(
-            buy_score,
-            2
-        ),
-        "sell_score": round(
-            sell_score,
-            2
-        ),
-        "reason": " | ".join(
-            reasons[:8]
-        ),
-        "historical_matches": historical[
-            "sample"
-        ],
-        "historical_bias": historical[
-            "direction"
-        ],
-        "historical_strength": historical[
-            "strength"
-        ],
+        "evidence_score": round(max(buy_score, sell_score), 2),
+        "buy_score": round(buy_score, 2),
+        "sell_score": round(sell_score, 2),
+        "reason": " | ".join(reasons[:10]),
+        "historical_matches": historical["sample"],
+        "historical_bias": historical["direction"],
+        "historical_strength": historical["strength"],
+        "historical_performance": performance,
+        "event_family": macro["family"],
+        "expected_macro": macro,
         "news_sentiment": news_sentiment,
         "x_sentiment": x_sentiment,
         "market": market,
-        "research_available": research[
-            "research_available"
-        ]
+        "research_available": research["research_available"]
     }
-
 
 def _nm_get_prediction(event_key):
     try:
@@ -5379,18 +5313,13 @@ def _nm_save_prediction(
                 "reason"
             ],
             _nm_json.dumps({
-                "news_sentiment":
-                    prediction.get(
-                        "news_sentiment"
-                    ),
-                "x_sentiment":
-                    prediction.get(
-                        "x_sentiment"
-                    ),
-                "research_available":
-                    prediction.get(
-                        "research_available"
-                    )
+                "news_sentiment": prediction.get("news_sentiment"),
+                "x_sentiment": prediction.get("x_sentiment"),
+                "research_available": prediction.get("research_available"),
+                "event_family": prediction.get("event_family"),
+                "expected_macro": prediction.get("expected_macro"),
+                "historical_performance": prediction.get("historical_performance"),
+                "market": prediction.get("market", {})
             }),
             prediction.get(
                 "historical_matches",
@@ -5552,12 +5481,28 @@ def _nm_capture_outcomes():
                 row["id"]
             ))
 
+            # Keep the economic calendar values with the completed
+            # event history so Previous / Forecast / Actual remain
+            # available for the News Analysis record.
+            event_details = {}
+            try:
+                calendar_events = _nm_get_calendar()
+                for calendar_event in calendar_events:
+                    if _nm_event_key(calendar_event) == row["event_key"]:
+                        event_details = calendar_event
+                        break
+            except Exception:
+                event_details = {}
+
             conn.execute("""
                 INSERT INTO news_event_history
                 (
                     event_key,
                     event_title,
                     event_time,
+                    actual,
+                    forecast,
+                    previous,
                     price_before,
                     price_5m,
                     price_15m,
@@ -5565,11 +5510,14 @@ def _nm_capture_outcomes():
                     direction,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 row["event_key"],
                 row["event_title"],
                 row["event_time"],
+                event_details.get("actual"),
+                event_details.get("forecast"),
+                event_details.get("previous"),
                 before,
                 after_5,
                 after_15,
@@ -5635,14 +5583,34 @@ def _nm_get_current():
             NM_EVENT_BEFORE_MINUTES
         ):
 
-            prediction = _nm_make_prediction(
-                event
+            # Generate the prediction once at the start of the 30-minute
+            # window, then keep the saved prediction unchanged on every
+            # subsequent API request for this event.
+            stored = _nm_get_prediction(
+                _nm_event_key(event)
             )
 
-            _nm_save_prediction(
-                event,
-                prediction
-            )
+            if stored:
+
+                prediction = stored
+
+            else:
+
+                prediction = _nm_make_prediction(
+                    event
+                )
+
+                _nm_save_prediction(
+                    event,
+                    prediction
+                )
+
+                stored = _nm_get_prediction(
+                    _nm_event_key(event)
+                )
+
+                if stored:
+                    prediction = stored
 
             return {
                 "status": "PREDICTION",
@@ -5707,14 +5675,17 @@ def _nm_get_current():
             ]
 
             return {
-                "status": (
-                    "ANALYSIS ONGOING"
-                    if later_events
-                    else
-                    "NO NEWS"
-                ),
+                "status": "POST-NEWS MONITORING",
                 "event": event,
-                "prediction": None,
+                # Retain the original BUY/SELL prediction for the full
+                # 30-minute post-news monitoring window.
+                "prediction": (
+                    stored.get(
+                        "prediction"
+                    )
+                    if stored
+                    else None
+                ),
                 "confidence": (
                     stored.get(
                         "confidence"
@@ -5795,10 +5766,17 @@ def _nm_statistics():
 
         conn = _nm_db()
 
-        total = conn.execute("""
+        # Every saved news prediction represents one analyzed high-impact
+        # event. Count it immediately, even while its 30-minute outcome is
+        # still pending.
+        total_events = conn.execute("""
+            SELECT COUNT(DISTINCT event_key)
+            FROM news_predictions
+        """).fetchone()[0]
+
+        predictions = conn.execute("""
             SELECT COUNT(*)
             FROM news_predictions
-            WHERE outcome IN ('WIN', 'LOSS')
         """).fetchone()[0]
 
         wins = conn.execute("""
@@ -5821,12 +5799,14 @@ def _nm_statistics():
 
         conn.close()
 
+        completed = wins + losses
+
         win_rate = (
             round(
-                (wins / total) * 100,
+                (wins / completed) * 100,
                 2
             )
-            if total
+            if completed
             else None
         )
 
@@ -5840,7 +5820,9 @@ def _nm_statistics():
         )
 
         return {
-            "signals": total,
+            "total_events": total_events,
+            "predictions": predictions,
+            "signals": predictions,
             "wins": wins,
             "losses": losses,
             "win_rate": win_rate,
@@ -5854,6 +5836,8 @@ def _nm_statistics():
         )
 
         return {
+            "total_events": 0,
+            "predictions": 0,
             "signals": 0,
             "wins": 0,
             "losses": 0,
@@ -6021,6 +6005,9 @@ def api_news():
                 ):
 
                     high.append({
+                        "id": ev.get(
+                            "id"
+                        ),
                         "title": ev.get(
                             "title",
                             ""
@@ -6033,7 +6020,16 @@ def api_news():
                             "country",
                             "USD"
                         ),
-                        "impact": "High"
+                        "impact": "High",
+                        "previous": ev.get(
+                            "previous"
+                        ),
+                        "forecast": ev.get(
+                            "forecast"
+                        ),
+                        "actual": ev.get(
+                            "actual"
+                        )
                     })
 
             _news_cache["data"] = high[:5]
