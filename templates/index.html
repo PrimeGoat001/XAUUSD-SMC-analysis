@@ -331,6 +331,13 @@
       </label>
 
       <label class="flex items-center gap-1 cursor-pointer whitespace-nowrap">
+        <input type="checkbox" id="toggle-trendlines" checked
+          onchange="requestAnimationFrame(renderSMCZonesCanvas)"
+          class="accent-yellow-400">
+        Trendlines
+      </label>
+
+      <label class="flex items-center gap-1 cursor-pointer whitespace-nowrap">
         <input type="checkbox" id="toggle-setups" checked
           onchange="requestAnimationFrame(drawSMCStructure)"
           class="accent-yellow-400">
@@ -770,6 +777,7 @@ let chart,
     activePriceLines = [],
     isInitialLoad = true,
     cachedNewsEvents = [],
+    newsAnalysisData = null,
     tfDataCache = {},
     currentFetchController = null,
     pendingChartVisibleRange = null,
@@ -1149,6 +1157,7 @@ function toggleNewsAnalysis(open = true) {
 
   if (open) {
 
+    loadNewsAnalysis();
     renderNewsAnalysis();
 
   }
@@ -1363,6 +1372,103 @@ function getNewsAnalysisAligned(event) {
 
 
 /* ============================================================
+   NEWS ANALYSIS API
+   ============================================================ */
+
+async function loadNewsAnalysis() {
+
+  try {
+
+    const response =
+      await fetch('/api/news-analysis', {
+        cache: 'no-store'
+      });
+
+    if (!response.ok) {
+      throw new Error('News Analysis request failed');
+    }
+
+    const data = await response.json();
+
+    newsAnalysisData = data || null;
+
+    // Merge the backend analysis fields into the calendar event used by
+    // the existing dashboard so the prediction and event data stay in
+    // one display path. No chart/SMC data is touched here.
+    if (data && data.event) {
+
+      const backendEvent = {
+        ...data.event,
+        prediction: data.prediction,
+        reason: data.reason,
+        aligned: data.aligned === true,
+        confidence: data.confidence,
+        evidence_score: data.evidence_score,
+        historical_matches: data.historical_matches
+      };
+
+      const backendKey =
+        backendEvent.id != null
+          ? String(backendEvent.id)
+          : String(backendEvent.date || '') + '|' +
+            String(backendEvent.title || '');
+
+      const existingIndex =
+        cachedNewsEvents.findIndex(event => {
+
+          const eventKey =
+            event.id != null
+              ? String(event.id)
+              : String(event.date || '') + '|' +
+                String(event.title || '');
+
+          return eventKey === backendKey;
+
+        });
+
+      if (existingIndex >= 0) {
+
+        cachedNewsEvents[existingIndex] = {
+          ...cachedNewsEvents[existingIndex],
+          ...backendEvent
+        };
+
+      }
+
+      else {
+
+        cachedNewsEvents.push(backendEvent);
+
+      }
+
+    }
+
+    const modal =
+      document.getElementById('newsAnalysisModal');
+
+    if (
+      modal &&
+      !modal.classList.contains('hidden')
+    ) {
+
+      renderNewsAnalysis();
+
+    }
+
+  }
+
+  catch (error) {
+
+    // Keep the last good News Analysis state on temporary feed/API
+    // failures. The existing calendar and SMC systems remain untouched.
+    console.warn('News Analysis unavailable', error);
+
+  }
+
+}
+
+
+/* ============================================================
    CORRECTED NEWS ANALYSIS DASHBOARD
    ============================================================ */
 
@@ -1497,13 +1603,59 @@ function renderNewsAnalysis() {
 
   }
 
+  // The News Analysis backend is authoritative for the active event.
+  // This is what actually triggers the BUY/SELL engine at the 30-minute
+  // window and retains its prediction through the 30-minute post-news
+  // monitoring window.
+  if (
+    newsAnalysisData &&
+    newsAnalysisData.event
+  ) {
+
+    const backendTime =
+      new Date(newsAnalysisData.event.date);
+
+    if (!isNaN(backendTime.getTime())) {
+
+      primaryEvent = {
+        ...newsAnalysisData.event,
+        eventTime: backendTime,
+        diffMs: backendTime - now,
+        prediction: newsAnalysisData.prediction,
+        reason: newsAnalysisData.reason,
+        aligned: newsAnalysisData.aligned === true,
+        confidence: newsAnalysisData.confidence,
+        evidence_score: newsAnalysisData.evidence_score,
+        historical_matches: newsAnalysisData.historical_matches
+      };
+
+      state = String(
+        newsAnalysisData.status ||
+        getNewsAnalysisState(primaryEvent, now)
+      ).toUpperCase();
+
+    }
+
+  }
+
+  if (
+    newsAnalysisData &&
+    String(newsAnalysisData.status || '').toUpperCase() === 'NO NEWS'
+  ) {
+
+    primaryEvent = null;
+    state = 'NO NEWS';
+
+  }
+
   let prediction =
     getNewsAnalysisPrediction(
       primaryEvent
     );
 
   if (
-    state !== 'PREDICTION'
+    state !== 'PREDICTION' &&
+    state !== 'POST-NEWS MONITORING'
   ) {
 
     prediction = null;
@@ -1558,10 +1710,18 @@ function renderNewsAnalysis() {
   ) {
 
     stateClass =
-      'text-yellow-400';
+      prediction === 'BUY'
+        ? 'text-green-400'
+        : prediction === 'SELL'
+          ? 'text-red-400'
+          : 'text-yellow-400';
 
     stateBg =
-      'bg-yellow-400/10 border-yellow-400/20';
+      prediction === 'BUY'
+        ? 'bg-green-500/10 border-green-500/30'
+        : prediction === 'SELL'
+          ? 'bg-red-500/10 border-red-500/30'
+          : 'bg-yellow-400/10 border-yellow-400/20';
 
     stateIcon =
       'fa-chart-line';
@@ -4583,6 +4743,117 @@ function renderSMCZonesCanvas() {
     canvas.height
   );
 
+  /* ==========================================================
+     AUTOMATED MEANINGFUL TRENDLINES
+     The backend decides which trendlines are meaningful.
+     The frontend only renders their exact time/price anchors.
+     ========================================================== */
+  const trendlineToggle =
+    document.getElementById('toggle-trendlines');
+
+  const showTrendlines =
+    trendlineToggle ? trendlineToggle.checked : true;
+
+  if (showTrendlines && Array.isArray(currentData.trendlines)) {
+
+    const candleData = Array.isArray(currentData.candles)
+      ? currentData.candles
+      : [];
+
+    const lastCandle = candleData.length
+      ? candleData[candleData.length - 1]
+      : null;
+
+    currentData.trendlines.forEach((tl, index) => {
+
+      if (!tl) return;
+
+      const time1 = Number(tl.time1);
+      const time2 = Number(tl.time2);
+      const price1 = Number(tl.price1);
+      const price2 = Number(tl.price2);
+
+      if (![time1, time2, price1, price2].every(Number.isFinite)) {
+        return;
+      }
+
+      let endTime = time2;
+      let endPrice = price2;
+
+      // Extend the backend trendline from its second anchor to the
+      // latest candle using the backend-provided slope.
+      if (lastCandle && Number.isFinite(Number(lastCandle.time))) {
+        const lastTime = Number(lastCandle.time);
+        const intervalSeconds =
+          Math.max(1, Math.abs(time2 - time1) / Math.max(1, Math.round(Math.abs((price2 - price1) / (Number(tl.slope) || 1)))));
+
+        // Prefer candle-index projection when the backend slope is
+        // available; this preserves the exact backend trendline.
+        const slope = Number(tl.slope);
+        const secondIndex = candleData.findIndex(c => Number(c.time) === time2);
+        if (Number.isFinite(slope) && secondIndex >= 0) {
+          const barsForward = candleData.length - 1 - secondIndex;
+          endTime = lastTime;
+          endPrice = price2 + slope * barsForward;
+        } else if (Number.isFinite(slope) && intervalSeconds > 0) {
+          const barsForward = Math.max(0, (lastTime - time2) / intervalSeconds);
+          endTime = lastTime;
+          endPrice = price2 + slope * barsForward;
+        }
+      }
+
+      const x1 = chart.timeScale().timeToCoordinate(time1);
+      const x2 = chart.timeScale().timeToCoordinate(endTime);
+      const y1 = candleSeries.priceToCoordinate(price1);
+      const y2 = candleSeries.priceToCoordinate(endPrice);
+
+      if ([x1, x2, y1, y2].some(v => v === null || !Number.isFinite(Number(v)))) {
+        return;
+      }
+
+      const bullish =
+        String(tl.direction || '').toLowerCase() === 'bullish';
+
+      const lineColor =
+        tl.color || (bullish ? '#00ff88' : '#ff4444');
+
+      ctx.save();
+      ctx.strokeStyle = lineColor;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.9;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(Number(x1), Number(y1));
+      ctx.lineTo(Number(x2), Number(y2));
+      ctx.stroke();
+
+      // Small endpoint reinforces that the line is anchored to the
+      // backend-selected swing rather than being a floating line.
+      ctx.fillStyle = lineColor;
+      ctx.beginPath();
+      ctx.arc(Number(x1), Number(y1), 2.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.font = 'bold 9px monospace';
+      const quality = Number(tl.quality);
+      const touches = Number(tl.touches);
+      const label = bullish ? 'BULL TL' : 'BEAR TL';
+      const detail = Number.isFinite(touches)
+        ? `${label} • ${touches}T`
+        : label;
+
+      const labelX = Math.max(4, Math.min(canvas.width - 90, Number(x1) + 5));
+      const labelY = Math.max(12, Math.min(canvas.height - 4, Number(y1) - 6));
+      ctx.fillStyle = '#111119';
+      const labelWidth = ctx.measureText(detail).width + 8;
+      ctx.fillRect(labelX - 3, labelY - 10, labelWidth, 13);
+      ctx.fillStyle = lineColor;
+      ctx.fillText(detail, labelX, labelY);
+      ctx.restore();
+
+    });
+  }
+
   const obToggle =
     document.getElementById(
       'toggle-ob'
@@ -5121,6 +5392,7 @@ initializeChart();
 updateMarketSessionsAndClock();
 
 loadNewsEvents();
+loadNewsAnalysis();
 
 loadChartHistory(false);
 
@@ -5138,6 +5410,12 @@ setInterval(
 /* ============================================================
    NEWS ANALYSIS AUTO REFRESH
    ============================================================ */
+
+setInterval(() => {
+
+  loadNewsAnalysis();
+
+}, 5000);
 
 setInterval(() => {
 
