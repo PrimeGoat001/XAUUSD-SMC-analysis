@@ -95,7 +95,7 @@
 
 <body class="text-white w-full max-w-[1400px] mx-auto px-2 md:px-4 pb-8">
 
-  
+  <!-- TOP HEADER -->
   <div class="bg-[#111119] border border-white/10 rounded-t-2xl mt-2 overflow-hidden">
 
     <div class="px-3 py-2 flex flex-wrap items-center justify-between text-xs font-mono gap-2 border-b border-white/10">
@@ -123,7 +123,7 @@
 
     </div>
 
-    
+    <!-- NEWS ALERT -->
     <div
       id="newsAlertBanner"
       class="hidden bg-red-500/15 border-b border-red-500/30 px-3 py-2 text-xs font-mono flex flex-col sm:flex-row items-start sm:items-center justify-between text-red-300 gap-2">
@@ -153,7 +153,7 @@
 
     </div>
 
-    
+    <!-- MAIN HEADER -->
     <div class="flex flex-col md:flex-row items-center justify-between gap-3 px-3 py-4 bg-[#111119]/55">
 
       <div class="flex items-center justify-between w-full md:w-auto">
@@ -173,7 +173,7 @@
 
       </div>
 
-      
+      <!-- TIMEFRAMES -->
       <div
         class="flex bg-white/5 p-1 rounded-full border border-white/10 text-xs font-mono overflow-x-auto max-w-full">
 
@@ -224,7 +224,7 @@
 
       </div>
 
-      
+      <!-- HEADER BUTTONS -->
       <div class="flex flex-wrap items-center gap-2 justify-center w-full md:w-auto">
 
         <button
@@ -254,7 +254,7 @@
 
   </div>
 
-  
+  <!-- MTF MATRIX -->
   <div
     class="mt-3 bg-[#111119] border border-white/5 rounded-2xl p-3 flex flex-col md:flex-row items-start md:items-center justify-between gap-2 text-xs font-mono overflow-x-auto">
 
@@ -270,7 +270,7 @@
 
   </div>
 
-  
+  <!-- SMC LAYERS -->
   <div
     class="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-3 px-3 py-3 mt-2 bg-[#111119] border border-white/5 rounded-xl text-xs">
 
@@ -331,17 +331,17 @@
       </label>
 
       <label class="flex items-center gap-1 cursor-pointer whitespace-nowrap">
-        <input type="checkbox" id="toggle-trendlines" checked
-          onchange="requestAnimationFrame(renderSMCZonesCanvas)"
-          class="accent-yellow-400">
-        Trendlines
-      </label>
-
-      <label class="flex items-center gap-1 cursor-pointer whitespace-nowrap">
         <input type="checkbox" id="toggle-setups" checked
           onchange="requestAnimationFrame(drawSMCStructure)"
           class="accent-yellow-400">
         BUY/SELL Setups
+      </label>
+
+      <label class="flex items-center gap-1 cursor-pointer whitespace-nowrap">
+        <input type="checkbox" id="toggle-trendline" checked
+          onchange="requestAnimationFrame(renderSMCZonesCanvas)"
+          class="accent-yellow-400">
+        Trendlines
       </label>
 
       <label class="flex items-center gap-1 cursor-pointer whitespace-nowrap">
@@ -362,14 +362,14 @@
 
   </div>
 
-  
+  <!-- CHART -->
   <div class="grid grid-cols-1 lg:grid-cols-4 gap-4 mt-3">
 
     <div
       id="chartContainerBlock"
       class="lg:col-span-3 bg-[#111119] border border-white/5 rounded-[24px] p-3 relative overflow-hidden flex flex-col">
 
-      
+      <!-- FULLSCREEN TIMEFRAMES -->
       <div
         id="fullscreenTimeframes"
         class="hidden items-center gap-1 bg-[#111119] border border-white/10 rounded-xl p-1 mb-2 overflow-x-auto no-scrollbar shrink-0">
@@ -480,7 +480,7 @@
 
     </div>
 
-    
+    <!-- INFO -->
     <div class="flex flex-col gap-4">
 
       <div
@@ -507,18 +507,18 @@
       class="bg-[#111119] border border-white/5 rounded-[24px] p-4">
 
       <div class="text-[10px] text-yellow-400 font-bold uppercase tracking-widest">
-        SMC Commentary
+        SMC Statistics
       </div>
 
-      <div class="mt-2 text-xs text-white/50 font-mono">
-        Loading SMC Commentary...
+      <div id="smcStatisticsContent" class="mt-2">
+        <div class="text-xs text-white/50 font-mono">Loading SMC Statistics...</div>
       </div>
 
     </div>
 
   </div>
 
-  
+  <!-- FOOTER -->
   <footer
     class="mt-6 bg-[#111119] border border-white/5 rounded-[24px] p-4 md:p-5 text-xs text-white/60 space-y-4">
 
@@ -661,7 +661,7 @@
 
   </footer>
 
-  
+  <!-- NEWS MODAL -->
   <div
     id="newsModal"
     class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
@@ -705,7 +705,7 @@
 
   </div>
 
-  
+  <!-- NEWS ANALYSIS -->
   <div
     id="newsAnalysisModal"
     class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
@@ -4363,106 +4363,52 @@ function processChartData(d) {
     document.getElementById('smcCommentary');
 
   if (commentaryBox) {
-
-    const stats =
-      d.smc_statistics && typeof d.smc_statistics === 'object'
-        ? d.smc_statistics
-        : null;
-
-    const layers =
-      stats && Array.isArray(stats.layers)
-        ? stats.layers
-        : [];
-
-    const stateClass = state => {
-      if (state === 'positive') {
-        return {
-          box: 'bg-green-500/10 border-green-500/30',
-          title: 'text-green-300',
-          text: 'text-green-400'
-        };
-      }
-      if (state === 'negative') {
-        return {
-          box: 'bg-red-500/10 border-red-500/30',
-          title: 'text-red-300',
-          text: 'text-red-400'
-        };
-      }
-      return {
-        box: 'bg-yellow-400/10 border-yellow-400/25',
-        title: 'text-yellow-300',
-        text: 'text-yellow-400'
-      };
-    };
-
-    const confidence = safeNumber(
-      stats?.confidence,
-      safeNumber(d.confidence, 50)
-    );
-
-    const confirmed = safeNumber(
-      stats?.confirmed_setups,
-      0
-    );
-
-    const totalLayers = safeNumber(
-      stats?.total_layers,
-      layers.length || 8
-    );
-
-    const bias =
-      String(stats?.bias || 'WAIT').toUpperCase();
-
-    const biasClass =
-      bias === 'BUY'
-        ? 'text-green-400'
-        : bias === 'SELL'
-          ? 'text-red-400'
-          : 'text-yellow-400';
-
+    const stats = d.smc_statistics || {};
+    const layers = stats.layers || {};
+    const confidence = Number(stats.confidence ?? d.confidence ?? 0);
+    const confirmed = Number(stats.confirmed_setups ?? 0);
+    const total = Number(stats.total_layers ?? 8);
+    const bias = String(stats.bias || d.live_signal || 'WAIT').toUpperCase();
+    const order = [
+      ['structure','Market Structure'],
+      ['liquidity','Liquidity'],
+      ['fvg','FVG'],
+      ['order_block','Order Block'],
+      ['displacement','Displacement'],
+      ['premium_discount','Premium / Discount'],
+      ['trendline','Trendline'],
+      ['mtf_alignment','MTF Alignment']
+    ];
+    const stateClass = state => state === 'positive' ? 'text-green-400 border-green-400/20 bg-green-400/5' : state === 'negative' ? 'text-red-400 border-red-400/20 bg-red-400/5' : 'text-yellow-400 border-yellow-400/20 bg-yellow-400/5';
+    const rows = order.map(([key,label]) => {
+      const item = layers[key] || {};
+      return `<div class="rounded-xl border px-2.5 py-2 ${stateClass(item.state)}">
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-[10px] font-bold uppercase tracking-wide">${label}</span>
+          <span class="text-[9px] uppercase font-bold">${String(item.state || 'waiting')}</span>
+        </div>
+        <div class="mt-1 text-[10px] leading-relaxed text-white/75">${String(item.commentary || 'Insufficient evidence.')}</div>
+      </div>`;
+    }).join('');
     commentaryBox.innerHTML = `
-      <div class="flex items-start justify-between gap-3">
-        <div>
-          <div class="text-[10px] text-yellow-400 font-bold uppercase tracking-widest">SMC Statistics</div>
-          <div class="mt-1 text-[11px] text-white/45 font-mono">${String(stats?.timeframe || currentTF).toUpperCase()} evidence dashboard</div>
+      <div class="flex items-center justify-between gap-3">
+        <div class="text-[10px] text-yellow-400 font-bold uppercase tracking-widest">SMC Statistics</div>
+        <div class="text-[10px] text-white/50 font-mono">${String(d.timeframe || currentTF).toUpperCase()}</div>
+      </div>
+      <div class="mt-2 rounded-xl border border-yellow-400/20 bg-yellow-400/5 p-3">
+        <div class="flex items-end justify-between gap-3">
+          <div>
+            <div class="text-[9px] text-white/50 uppercase tracking-widest">Confidence</div>
+            <div class="text-2xl font-bold text-yellow-400">${Number.isFinite(confidence) ? confidence : 0}%</div>
+          </div>
+          <div class="text-right font-mono">
+            <div class="text-[11px] text-white/80">${confirmed} / ${total} CONFIRMATIONS</div>
+            <div class="text-[10px] ${bias.includes('BUY') ? 'text-green-400' : bias.includes('SELL') ? 'text-red-400' : 'text-yellow-400'}">${bias}</div>
+          </div>
         </div>
-
-        <div class="bg-yellow-400/10 border border-yellow-400/30 rounded-xl px-3 py-2 text-center min-w-[88px]">
-          <div class="text-[8px] text-yellow-300 uppercase font-bold tracking-widest">Confidence</div>
-          <div class="text-xl font-black text-yellow-400 leading-tight">${safeFixed(confidence, 0, '50')}%</div>
-        </div>
       </div>
-
-      <div class="mt-2 flex items-center justify-between text-[10px] font-mono">
-        <span class="${biasClass} font-bold">${bias} BIAS</span>
-        <span class="text-white/50">${confirmed} / ${totalLayers} CONFIRMED</span>
-      </div>
-
-      <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
-        ${layers.map(layer => {
-          const c = stateClass(layer.state);
-          const icon =
-            layer.state === 'positive'
-              ? '✓'
-              : layer.state === 'negative'
-                ? '×'
-                : '•';
-          return `
-            <div class="${c.box} border rounded-xl p-2.5">
-              <div class="flex items-center justify-between gap-2">
-                <div class="text-[9px] ${c.title} uppercase font-bold tracking-wide">${String(layer.title || '').replace(/</g, '&lt;')}</div>
-                <span class="${c.text} text-xs font-black">${icon}</span>
-              </div>
-              <div class="mt-1 text-[10px] ${c.text} font-mono leading-relaxed">
-                ${String(layer.commentary || 'Waiting for confirmation').replace(/</g, '&lt;')}
-              </div>
-            </div>
-          `;
-        }).join('')}
-      </div>
+      <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-1.5">${rows}</div>
     `;
-
   }
 
   if (
@@ -4822,124 +4768,6 @@ function renderSMCZonesCanvas() {
     canvas.height
   );
 
-  /* ==========================================================
-     AUTOMATED MEANINGFUL TRENDLINES
-     The backend decides which trendlines are meaningful.
-     The frontend only renders their exact time/price anchors.
-     ========================================================== */
-  const trendlineToggle =
-    document.getElementById('toggle-trendlines');
-
-  const showTrendlines =
-    trendlineToggle ? trendlineToggle.checked : true;
-
-  if (showTrendlines && Array.isArray(currentData.trendlines)) {
-
-    const candleData = Array.isArray(currentData.candles)
-      ? currentData.candles
-      : [];
-
-    const lastCandle = candleData.length
-      ? candleData[candleData.length - 1]
-      : null;
-
-    const activeBackendTimeframe = normalizeFrontendTF(currentTF);
-
-    currentData.trendlines.forEach((tl, index) => {
-
-      if (!tl) return;
-
-      // Trendlines belong only to the timeframe that produced them.
-      if (tl.timeframe && String(tl.timeframe) !== String(activeBackendTimeframe)) {
-        return;
-      }
-
-      const time1 = Number(tl.time1);
-      const time2 = Number(tl.time2);
-      const price1 = Number(tl.price1);
-      const price2 = Number(tl.price2);
-
-      if (![time1, time2, price1, price2].every(Number.isFinite)) {
-        return;
-      }
-
-      let endTime = time2;
-      let endPrice = price2;
-
-      // Extend the backend trendline from its second anchor to the
-      // latest candle using the backend-provided slope.
-      if (lastCandle && Number.isFinite(Number(lastCandle.time))) {
-        const lastTime = Number(lastCandle.time);
-        const intervalSeconds =
-          Math.max(1, Math.abs(time2 - time1) / Math.max(1, Math.round(Math.abs((price2 - price1) / (Number(tl.slope) || 1)))));
-
-        // Prefer candle-index projection when the backend slope is
-        // available; this preserves the exact backend trendline.
-        const slope = Number(tl.slope);
-        const secondIndex = candleData.findIndex(c => Number(c.time) === time2);
-        if (Number.isFinite(slope) && secondIndex >= 0) {
-          const barsForward = candleData.length - 1 - secondIndex;
-          endTime = lastTime;
-          endPrice = price2 + slope * barsForward;
-        } else if (Number.isFinite(slope) && intervalSeconds > 0) {
-          const barsForward = Math.max(0, (lastTime - time2) / intervalSeconds);
-          endTime = lastTime;
-          endPrice = price2 + slope * barsForward;
-        }
-      }
-
-      const x1 = chart.timeScale().timeToCoordinate(time1);
-      const x2 = chart.timeScale().timeToCoordinate(endTime);
-      const y1 = candleSeries.priceToCoordinate(price1);
-      const y2 = candleSeries.priceToCoordinate(endPrice);
-
-      if ([x1, x2, y1, y2].some(v => v === null || !Number.isFinite(Number(v)))) {
-        return;
-      }
-
-      const bullish =
-        String(tl.direction || '').toLowerCase() === 'bullish';
-
-      const lineColor =
-        tl.color || (bullish ? '#00ff88' : '#ff4444');
-
-      ctx.save();
-      ctx.strokeStyle = lineColor;
-      ctx.lineWidth = 2;
-      ctx.globalAlpha = 0.9;
-      ctx.setLineDash([]);
-      ctx.beginPath();
-      ctx.moveTo(Number(x1), Number(y1));
-      ctx.lineTo(Number(x2), Number(y2));
-      ctx.stroke();
-
-      // Small endpoint reinforces that the line is anchored to the
-      // backend-selected swing rather than being a floating line.
-      ctx.fillStyle = lineColor;
-      ctx.beginPath();
-      ctx.arc(Number(x1), Number(y1), 2.5, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.font = 'bold 9px monospace';
-      const quality = Number(tl.quality);
-      const touches = Number(tl.touches);
-      const label = bullish ? 'BULL TL' : 'BEAR TL';
-      const detail = Number.isFinite(touches)
-        ? `${label} • ${touches}T`
-        : label;
-
-      const labelX = Math.max(4, Math.min(canvas.width - 90, Number(x1) + 5));
-      const labelY = Math.max(12, Math.min(canvas.height - 4, Number(y1) - 6));
-      ctx.fillStyle = '#111119';
-      const labelWidth = ctx.measureText(detail).width + 8;
-      ctx.fillRect(labelX - 3, labelY - 10, labelWidth, 13);
-      ctx.fillStyle = lineColor;
-      ctx.fillText(detail, labelX, labelY);
-      ctx.restore();
-
-    });
-  }
-
   const obToggle =
     document.getElementById(
       'toggle-ob'
@@ -5262,6 +5090,27 @@ function renderSMCZonesCanvas() {
   });
 
 }
+
+
+  const trendToggle = document.getElementById('toggle-trendline');
+  const showTrendlines = trendToggle ? trendToggle.checked : true;
+  if (showTrendlines && Array.isArray(data.trendlines)) {
+    data.trendlines.forEach(line => {
+      if (!line || line.valid === false) return;
+      const x1 = chart.timeScale().timeToCoordinate(Number(line.time1));
+      const x2 = chart.timeScale().timeToCoordinate(Number(line.time2));
+      const y1 = candleSeries.priceToCoordinate(Number(line.price1));
+      const y2 = candleSeries.priceToCoordinate(Number(line.price2));
+      if (x1 === null || x2 === null || y1 === null || y2 === null) return;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.strokeStyle = line.color || (line.direction === 'bullish' ? '#00ff88' : '#ff4444');
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.stroke();
+    });
+  }
 
 
 /* ============================================================
