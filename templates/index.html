@@ -782,7 +782,9 @@ let chart,
     currentFetchController = null,
     pendingChartVisibleRange = null,
     exportCaptureInProgress = false,
-    exportSavedVisibleRange = null;
+    exportSavedVisibleRange = null,
+    chartStartupRetryTimer = null,
+    chartStartupRetryCount = 0;
 
 
 /* ============================================================
@@ -2710,10 +2712,25 @@ function initializeChart() {
     }, 50);
 
     setTimeout(() => {
-
       resizeChart();
-
     }, 300);
+
+    // Mobile browsers can report a temporary zero-sized chart container
+    // during first paint. Re-measure after layout settles and when the
+    // page becomes visible again.
+    [700, 1200, 2000].forEach(delay => {
+      setTimeout(() => {
+        resizeChart();
+        if (currentData?.candles?.length && chart) {
+          requestAnimationFrame(() => {
+            try {
+              chart.timeScale().fitContent();
+              renderSMCZonesCanvas();
+            } catch (e) {}
+          });
+        }
+      }, delay);
+    });
 
     return true;
 
@@ -2984,6 +3001,14 @@ async function loadCandlesOnly(
   signal
 ) {
 
+  // Create the chart immediately; do not make chart visibility depend
+  // on the first candle API response arriving successfully.
+  if (!initializeChart()) {
+    throw new Error('Chart could not be initialized');
+  }
+
+  resizeChart();
+
   const response =
     await fetch(
       `/api/candles?tf=${encodeURIComponent(backendTF)}`,
@@ -3014,16 +3039,6 @@ async function loadCandlesOnly(
 
   }
 
-  if (
-    !initializeChart()
-  ) {
-
-    throw new Error(
-      'Chart could not be initialized'
-    );
-
-  }
-
   const savedVisibleRange =
     pendingChartVisibleRange ||
     getChartVisibleRangeSafe();
@@ -3038,6 +3053,12 @@ async function loadCandlesOnly(
 
   currentData.candles =
     candles;
+
+  chartStartupRetryCount = 0;
+  if (chartStartupRetryTimer) {
+    clearTimeout(chartStartupRetryTimer);
+    chartStartupRetryTimer = null;
+  }
 
   if (savedVisibleRange) {
 
@@ -3458,6 +3479,32 @@ async function loadNewsEvents() {
    LOAD CHART HISTORY
    ============================================================ */
 
+function scheduleInitialChartRetry() {
+
+  if (chartStartupRetryTimer || chartStartupRetryCount >= 5) {
+    return;
+  }
+
+  const delays = [1500, 3000, 5000, 8000, 12000];
+  const delay = delays[chartStartupRetryCount] || 12000;
+  chartStartupRetryCount += 1;
+
+  chartStartupRetryTimer = setTimeout(() => {
+    chartStartupRetryTimer = null;
+
+    if (
+      !document.hidden &&
+      (!currentData ||
+       !Array.isArray(currentData.candles) ||
+       currentData.candles.length === 0)
+    ) {
+      loadChartHistory(false);
+    }
+  }, delay);
+
+}
+
+
 async function loadChartHistory(showLoading = false) {
 
   if (currentFetchController) {
@@ -3521,6 +3568,15 @@ async function loadChartHistory(showLoading = false) {
         "Candle Load Error:",
         candleError
       );
+
+      if (
+        !controller.signal.aborted &&
+        (!currentData ||
+         !Array.isArray(currentData.candles) ||
+         currentData.candles.length === 0)
+      ) {
+        scheduleInitialChartRetry();
+      }
 
     }
 
@@ -5317,7 +5373,38 @@ document.addEventListener(
    INITIAL STARTUP
    ============================================================ */
 
+// Initialize the chart synchronously on first page load, rather than
+// waiting for the candle-history request to finish.
 initializeChart();
+
+requestAnimationFrame(() => {
+  resizeChart();
+  requestAnimationFrame(resizeChart);
+});
+
+window.addEventListener('load', () => {
+  resizeChart();
+  setTimeout(resizeChart, 250);
+});
+
+window.addEventListener('pageshow', () => {
+  resizeChart();
+  setTimeout(resizeChart, 150);
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    resizeChart();
+    setTimeout(resizeChart, 150);
+    if (
+      !currentData ||
+      !Array.isArray(currentData.candles) ||
+      currentData.candles.length === 0
+    ) {
+      loadChartHistory(false);
+    }
+  }
+});
 
 updateMarketSessionsAndClock();
 
