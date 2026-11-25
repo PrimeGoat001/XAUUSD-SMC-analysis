@@ -1518,6 +1518,40 @@ def _add_zone_state(zone, candles):
     return zone
 
 
+# ============================================================
+# CHART OBJECT LIFECYCLE / IMMEDIATE INVALIDATION CLEANUP
+# ============================================================
+def _chart_object_is_active(obj):
+    """Return False for an object whose own violation rule has fired.
+
+    This is a final safety gate before chart payload construction. It keeps
+    invalidated zones, trendlines, patterns, and structure objects out of the
+    response so the frontend cannot continue displaying stale analysis.
+    """
+    if not isinstance(obj, dict):
+        return False
+    status = str(obj.get("status", "")).strip().lower()
+    invalid_statuses = {
+        "violated", "invalid", "invalidated", "broken", "expired", "removed"
+    }
+    if status in invalid_statuses:
+        return False
+    if obj.get("valid") is False:
+        return False
+    if obj.get("active") is False:
+        return False
+    if obj.get("invalidated") is True or obj.get("violated") is True:
+        return False
+    if obj.get("broken") is True:
+        return False
+    return True
+
+
+def _prune_violated_chart_objects(items):
+    """Strip violated/inactive objects before they reach the chart API."""
+    return [item for item in (items or []) if _chart_object_is_active(item)]
+
+
 def detect_fvgs(candles, max_zones=6):
     active = []
     if len(candles) < 5:
@@ -3137,16 +3171,19 @@ def detect_support_resistance(candles, max_levels=4):
 # ============================================================
 
 def detect_trendlines(candles, max_lines=4):
-    """Detect only meaningful local higher-low/lower-high trendlines.
+    """Detect confirmed timeframe-local trendlines with at least 3 touches.
 
-    Lines are calculated from the selected timeframe's candles only. A decisive
-    close through the projected line invalidates the line; a wick/pierce alone
-    does not.
+    Bullish support lines connect higher swing lows and are drawn below price.
+    Bearish resistance lines connect lower swing highs and are drawn above price.
+    A line is accepted only when at least three distinct confirmed swing points
+    touch it within an ATR-based tolerance. Wick touches are allowed; a decisive
+    close through the projected line invalidates it.
     """
     if len(candles) < 30:
         return []
 
     atr = calculate_atr(candles) or 1.0
+    tolerance = max(atr * 0.18, 0.00001)
     highs = find_swing_highs(candles, 3, 3)
     lows = find_swing_lows(candles, 3, 3)
     lines = []
@@ -3154,48 +3191,133 @@ def detect_trendlines(candles, max_lines=4):
     def make_line(points, bullish):
         if len(points) < 3:
             return None
+
+        price_key = 'low' if bullish else 'high'
         candidates = []
-        for a in range(max(0, len(points)-8), len(points)-1):
-            for b in range(a+1, len(points)):
-                i1, i2 = points[a], points[b]
-                p1 = candles[i1]['low' if bullish else 'high']
-                p2 = candles[i2]['low' if bullish else 'high']
+        # Evaluate recent pivot pairs; the pair defines the slope, while
+        # independent pivots along that slope must supply 3+ real touches.
+        recent = points[-10:]
+        for a in range(len(recent) - 1):
+            i1 = recent[a]
+            p1 = float(candles[i1][price_key])
+            for b in range(a + 1, len(recent)):
+                i2 = recent[b]
+                p2 = float(candles[i2][price_key])
+
                 if bullish and p2 <= p1:
                     continue
                 if not bullish and p2 >= p1:
                     continue
-                dt = max(candles[i2]['time'] - candles[i1]['time'], 1)
-                slope = (p2-p1)/dt
-                touches = 0
-                for idx in points:
-                    if idx <= i1 or idx > min(len(candles)-1, i2 + 30):
-                        continue
-                    projected = p1 + slope*(candles[idx]['time']-candles[i1]['time'])
-                    price = candles[idx]['low' if bullish else 'high']
-                    if abs(price-projected) <= atr*0.18:
-                        touches += 1
-                if touches < 1:
+
+                t1 = float(candles[i1]['time'])
+                t2 = float(candles[i2]['time'])
+                dt = t2 - t1
+                if dt <= 0:
                     continue
-                candidates.append((touches, i2, i1, p1, p2, slope))
+                slope = (p2 - p1) / dt
+
+                touches = []
+                for idx in points:
+                    if idx < i1:
+                        continue
+                    point_time = float(candles[idx]['time'])
+                    projected = p1 + slope * (point_time - t1)
+                    point_price = float(candles[idx][price_key])
+                    if abs(point_price - projected) <= tolerance:
+                        touches.append({
+                            'time': candles[idx]['time'],
+                            'price': round(point_price, 5),
+                            'index': idx
+                        })
+
+                # Strict rule: three distinct swing pivots must touch.
+                if len(touches) < 3:
+                    continue
+
+                # A bullish support line must remain below price action;
+                # bearish resistance must remain above it. Ignore the pivot
+                # candles themselves when checking closes to avoid rejecting
+                # a valid line due to the pivot's wick/body geometry.
+                invalid_close = False
+                for idx in range(i1 + 1, len(candles)):
+                    if any(t['index'] == idx for t in touches):
+                        continue
+                    current_time = float(candles[idx]['time'])
+                    projected = p1 + slope * (current_time - t1)
+                    close = float(candles[idx]['close'])
+                    if bullish and close < projected - tolerance:
+                        invalid_close = True
+                        break
+                    if not bullish and close > projected + tolerance:
+                        invalid_close = True
+                        break
+                if invalid_close:
+                    continue
+
+                last_time = float(candles[-1]['time'])
+                projected_last = p1 + slope * (last_time - t1)
+                candidates.append({
+                    'touches': touches,
+                    'i1': i1,
+                    'i2': i2,
+                    'p1': p1,
+                    'p2': p2,
+                    'slope': slope,
+                    'projected_last': projected_last,
+                    'touch_count': len(touches)
+                })
+
         if not candidates:
             return None
-        selected_touches, i2, i1, p1, p2, slope = max(candidates, key=lambda x:(x[0],x[1]))
-        last_time = candles[-1]['time']
-        projected_last = p1 + slope*(last_time-candles[i1]['time'])
-        last = candles[-1]
-        buffer = atr*0.15
-        invalid = (last['close'] < projected_last-buffer) if bullish else (last['close'] > projected_last+buffer)
+
+        # Prefer the strongest line (most touches), then the most recent
+        # final touch, then the smallest average touch error.
+        def rank(candidate):
+            errors = []
+            t1 = float(candles[candidate['i1']]['time'])
+            for touch in candidate['touches']:
+                projected = candidate['p1'] + candidate['slope'] * (
+                    float(touch['time']) - t1
+                )
+                errors.append(abs(touch['price'] - projected))
+            return (
+                candidate['touch_count'],
+                candidate['touches'][-1]['index'],
+                -sum(errors) / max(len(errors), 1)
+            )
+
+        best = max(candidates, key=rank)
+        i1 = best['i1']
+        i2 = best['i2']
+        projected_last = best['projected_last']
+
+        # Final close confirmation: a wick/pierce alone does not break it.
+        last_close = float(candles[-1]['close'])
+        invalid = (
+            last_close < projected_last - tolerance
+            if bullish else last_close > projected_last + tolerance
+        )
         if invalid:
             return None
+
         return {
             'id': f"{'bull' if bullish else 'bear'}:{candles[i1]['time']}:{candles[i2]['time']}",
             'direction': 'bullish' if bullish else 'bearish',
-            'time1': candles[i1]['time'], 'price1': round(p1,2),
-            'time2': candles[-1]['time'], 'price2': round(projected_last,2),
-            'anchor_time2': candles[i2]['time'], 'anchor_price2': round(p2,2),
-            'projected_price': round(projected_last,2),
-            'touches': selected_touches + 2,
+            'time1': candles[i1]['time'],
+            'price1': round(best['p1'], 5),
+            'time2': candles[-1]['time'],
+            'price2': round(projected_last, 5),
+            'anchor_time2': candles[i2]['time'],
+            'anchor_price2': round(best['p2'], 5),
+            'projected_price': round(projected_last, 5),
+            'touches': best['touch_count'],
+            'touch_points': [
+                {'time': t['time'], 'price': t['price']}
+                for t in best['touches']
+            ],
             'valid': True,
+            'confirmed': True,
+            'line_position': 'below_price' if bullish else 'above_price',
             'layer': 'trendline',
             'color': '#00ff88' if bullish else '#ff4444',
             'label': 'BULLISH TRENDLINE' if bullish else 'BEARISH TRENDLINE'
@@ -3690,20 +3812,20 @@ def smc_analysis(interval="5m"):
         smc_candles
     )
 
-    sr_levels = detect_support_resistance(
-        smc_candles
+    sr_levels = _prune_violated_chart_objects(
+        detect_support_resistance(smc_candles)
     )
 
     pd = calculate_pd(
         smc_candles
     )
 
-    chart_patterns = detect_chart_patterns(
-        smc_candles
+    chart_patterns = _prune_violated_chart_objects(
+        detect_chart_patterns(smc_candles)
     )
 
-    trendlines = detect_trendlines(
-        smc_candles
+    trendlines = _prune_violated_chart_objects(
+        detect_trendlines(smc_candles)
     )
 
     pattern_confirmation = get_pattern_confirmation(
@@ -3747,10 +3869,10 @@ def smc_analysis(interval="5m"):
         })
 
     lines.extend(
-        liq_lines
+        _prune_violated_chart_objects(liq_lines)
     )
 
-    for sr in sr_levels:
+    for sr in _prune_violated_chart_objects(sr_levels):
         lines.append({
             "price": sr["price"],
             "color": "#00ff88" if sr["direction"] == "bullish" else "#ff4444",
@@ -3763,11 +3885,11 @@ def smc_analysis(interval="5m"):
     zones = []
 
     zones.extend(
-        fvg_zones
+        _prune_violated_chart_objects(fvg_zones)
     )
 
     zones.extend(
-        ob_zones
+        _prune_violated_chart_objects(ob_zones)
     )
 
     markers = []
@@ -3800,7 +3922,7 @@ def smc_analysis(interval="5m"):
         })
 
     for sr in sr_levels:
-        if sr.get("status") in {"BROKEN", "CONFIRMED"}:
+        if sr.get("status") == "CONFIRMED":
             markers.append({
                 "time": smc_candles[-1]["time"],
                 "label": sr["label"],
@@ -4002,11 +4124,11 @@ def smc_analysis(interval="5m"):
         "markers": markers,
         "lines": lines,
         "zones": zones,
-        "trendlines": trendlines,
+        "trendlines": _prune_violated_chart_objects(trendlines),
 
-        "fvg_zones": fvg_zones,
-        "ob_zones": ob_zones,
-        "patterns": chart_patterns,
+        "fvg_zones": _prune_violated_chart_objects(fvg_zones),
+        "ob_zones": _prune_violated_chart_objects(ob_zones),
+        "patterns": _prune_violated_chart_objects(chart_patterns),
 
         "pattern_confirmation":
             pattern_confirmation,
@@ -4018,7 +4140,7 @@ def smc_analysis(interval="5m"):
         "pd_zones": pd,
 
         "mss": mss,
-        "support_resistance": sr_levels,
+        "support_resistance": _prune_violated_chart_objects(sr_levels),
         "smc_commentary": commentary,
         "smc_statistics": {
             "confidence": signal_data.get("confidence", 0),
@@ -4302,10 +4424,22 @@ _CAL_CACHE_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "calendar_cache.json"
 )
-_CAL_FRESH_SECONDS = 600
+# Forex Factory regenerates its weekly export roughly hourly. Keep a full-hour
+# local cache and NEVER bypass it for a near-event refresh. Their export endpoint
+# is rate-limited by source IP, so all app features must share this one cache.
+_CAL_FRESH_SECONDS = 3600
+_CAL_MIN_REQUEST_GAP = 3600
+_CAL_FAILURE_BACKOFF = 900
 _cal_json_cache = {"data": None, "time": 0}
 _cal_fail_until = 0
 _cal_fetch_lock = threading.Lock()
+_cal_status = {
+    "last_success": None,
+    "last_attempt": None,
+    "last_error": None,
+    "requests": 0,
+    "next_fetch": None
+}
 
 
 def _cal_load_disk():
@@ -4329,17 +4463,11 @@ def _cal_save_disk(data):
 
 
 def _fetch_calendar_json(force=False):
-    """Robust calendar feed fetch shared by the news popup and the
-    News Analysis engine.
+    """Return the shared Forex Factory calendar with strict upstream throttling.
 
-    - uses a FRESH connection (not the shared SESSION) to avoid SSL
-      "bad record mac" errors from reused/shared connections
-    - a good result is reused for 10 minutes and saved to disk
-    - HTTP 429 (rate limit) is NOT retried; backs off 5 minutes
-    - other failures retry once, then back off 60s
-    - when the feed fails, the last good list (memory or disk) is
-      returned so the site keeps showing news
-    Returns the parsed list, or None only if no good list ever existed.
+    `force` is retained for backwards compatibility, but deliberately cannot
+    bypass the one-hour cache. The popup, News Machine and background worker all
+    share this single fetch gate. On failures, keep serving the last good copy.
     """
     global _cal_fail_until
 
@@ -4351,9 +4479,9 @@ def _fetch_calendar_json(force=False):
             _cal_json_cache["data"] = disk_data
             _cal_json_cache["time"] = disk_time
 
+    # Fast path: the weekly file is not updated more than hourly.
     if (
-        not force
-        and _cal_json_cache["data"] is not None
+        _cal_json_cache["data"] is not None
         and now - _cal_json_cache["time"] < _CAL_FRESH_SECONDS
     ):
         return _cal_json_cache["data"]
@@ -4362,75 +4490,70 @@ def _fetch_calendar_json(force=False):
         return _cal_json_cache["data"]
 
     with _cal_fetch_lock:
-
         now = time.time()
 
+        # Recheck inside the lock so concurrent API requests cannot fan out.
         if (
-            not force
-            and _cal_json_cache["data"] is not None
-            and now - _cal_json_cache["time"] < _CAL_FRESH_SECONDS
+            _cal_json_cache["data"] is not None
+            and now - _cal_json_cache["time"] < _CAL_MIN_REQUEST_GAP
         ):
             return _cal_json_cache["data"]
 
         if now < _cal_fail_until:
             return _cal_json_cache["data"]
 
-        backoff = 60
+        _cal_status["last_attempt"] = now_utc_iso()
+        _cal_status["requests"] += 1
 
-        for attempt in range(2):
+        try:
+            response = requests.get(
+                _CAL_FEED_URL,
+                headers=HEADERS,
+                timeout=8
+            )
 
-            try:
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, list) and data:
+                    fetched_at = time.time()
+                    _cal_json_cache["data"] = data
+                    _cal_json_cache["time"] = fetched_at
+                    _cal_fail_until = 0
+                    _cal_status["last_success"] = now_utc_iso()
+                    _cal_status["last_error"] = None
+                    _cal_status["next_fetch"] = datetime.fromtimestamp(
+                        fetched_at + _CAL_FRESH_SECONDS, timezone.utc
+                    ).isoformat()
+                    _cal_save_disk(data)
+                    print(
+                        f"[NEWS FEED] refreshed {len(data)} events; "
+                        f"next upstream check in {_CAL_FRESH_SECONDS}s"
+                    )
+                    return data
 
-                response = requests.get(
-                    _CAL_FEED_URL,
-                    headers=HEADERS,
-                    timeout=8
-                )
+                raise ValueError("Forex Factory returned an empty or invalid calendar")
 
-                if response.status_code == 200:
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After", "")
+                try:
+                    backoff = max(_CAL_FAILURE_BACKOFF, min(int(retry_after), 3600))
+                except (TypeError, ValueError):
+                    backoff = _CAL_FAILURE_BACKOFF
+                message = f"HTTP 429 rate limited; retrying after {backoff}s"
+            else:
+                backoff = _CAL_FAILURE_BACKOFF
+                message = f"HTTP {response.status_code}"
 
-                    data = response.json()
-
-                    if isinstance(data, list):
-
-                        _cal_json_cache["data"] = data
-                        _cal_json_cache["time"] = time.time()
-                        _cal_save_disk(data)
-
-                        return data
-
-                print(
-                    f"[NEWS FEED] HTTP {response.status_code} (attempt {attempt + 1})"
-                )
-
-                if response.status_code == 429:
-
-                    backoff = 300
-
-                    try:
-                        backoff = min(
-                            max(
-                                int(response.headers.get("Retry-After", 300)),
-                                60
-                            ),
-                            900
-                        )
-                    except Exception:
-                        backoff = 300
-
-                    break
-
-            except Exception as exc:
-
-                print(
-                    f"[NEWS FEED] {exc} (attempt {attempt + 1})"
-                )
-
-            if attempt == 0:
-                time.sleep(1.0)
+        except Exception as exc:
+            backoff = _CAL_FAILURE_BACKOFF
+            message = str(exc)
 
         _cal_fail_until = time.time() + backoff
-
+        _cal_status["last_error"] = message
+        _cal_status["next_fetch"] = datetime.fromtimestamp(
+            _cal_fail_until, timezone.utc
+        ).isoformat()
+        print(f"[NEWS FEED] {message}; keeping cached calendar")
         return _cal_json_cache["data"]
 
 
@@ -4467,9 +4590,9 @@ def _nm_get_calendar():
 
     try:
 
-        data = _fetch_calendar_json(
-            force=(refresh_interval == NM_CALENDAR_PREDICTION_REFRESH)
-        )
+        # The short pre-event refresh updates only this in-process view.
+        # The shared upstream fetch gate still enforces the one-hour limit.
+        data = _fetch_calendar_json()
 
         if data is None:
 
@@ -6367,6 +6490,28 @@ def api_news():
     # Never had a good result: report failure (HTTP 503) so the page
     # shows "News feed unavailable" instead of "No news".
     return jsonify([]), 503
+
+
+@app.route("/api/news-status")
+def api_news_status():
+    """Operational health for the economic-calendar feed."""
+    cache_age = (
+        max(0, round(time.time() - _cal_json_cache["time"]))
+        if _cal_json_cache["time"] else None
+    )
+    return jsonify({
+        "source": "Forex Factory weekly JSON",
+        "healthy": bool(_cal_json_cache["data"]) and not bool(_cal_status["last_error"]),
+        "cached_events": len(_cal_json_cache["data"] or []),
+        "cache_age_seconds": cache_age,
+        "cache_ttl_seconds": _CAL_FRESH_SECONDS,
+        "upstream_requests_this_process": _cal_status["requests"],
+        "last_attempt": _cal_status["last_attempt"],
+        "last_success": _cal_status["last_success"],
+        "last_error": _cal_status["last_error"],
+        "next_fetch": _cal_status["next_fetch"],
+        "serving_stale_cache": bool(_cal_json_cache["data"]) and cache_age is not None and cache_age >= _CAL_FRESH_SECONDS
+    })
 
 
 @app.route("/api/live-candle")
